@@ -1,22 +1,24 @@
-FROM rust:1.76.0 as builder
+FROM rust:1.76.0-slim-bookworm as builder
 WORKDIR /app
 
 # install trunk
 RUN cargo install --locked trunk
 
-# preload backend dependencies
+# preload dependencies
 COPY Cargo.toml Cargo.lock ./
+COPY ./front/Cargo.toml ./front/Cargo.toml
+
 RUN mkdir src && \
     echo "fn main() {}" > src/main.rs && \
-    cargo build --release && \
-    rm -rf src
-
-# preload frontend dependencies
-COPY ./front/Cargo.toml ./front/Cargo.toml
-RUN cd front && \
+    cd front && \
     mkdir src && \
     echo "fn main() {}" > src/main.rs && \
     cargo build --release && \
+    cd .. && \
+    cargo build --release && \
+    cd front && \
+    rm -rf src && \
+    cd .. && \
     rm -rf src
 
 # build project
