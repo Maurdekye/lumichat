@@ -16,9 +16,7 @@ RUN mkdir src && \
     cargo build --release && \
     cd .. && \
     cargo build --release && \
-    cd front && \
-    rm -rf src && \
-    cd .. && \
+    rm -rf front/src && \
     rm -rf src
 
 # build project
