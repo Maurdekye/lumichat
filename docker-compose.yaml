@@ -13,15 +13,24 @@ services:
       - "5432:5432"
     restart: always
 
+  redis:
+    image: redis:latest
+    ports:
+      - "6379:6379"
+    restart: always
+
   app:
     build: .
     ports:
       - "80:80"
     environment:
+      IDENTITY_SECRET: k3uJYxJY1vSxg9ow2yRIqaHFfsqb4JjIzkYck8A2qK2887yUQtEHshAO428775q5
       PORT: 80
       DATABASE_URL: postgres://postgres:root@db:5432/postgres
+      REDIS_URL: redis://redis:6379
     depends_on:
       - db
+      - redis
     restart: always
 
 volumes:

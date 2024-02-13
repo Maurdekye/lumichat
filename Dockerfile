@@ -31,6 +31,7 @@ RUN mkdir src && \
 # build project
 COPY ./ .
 # hack: have to update the source code to force a rebuild; just append a newline to main.rs
+RUN cd front && trunk build --release
 RUN echo "\n" >> front/src/main.rs
 RUN cd front && trunk build --release
 RUN cargo build --release

@@ -1,2 +1,5 @@
 /target
 /front/dist
+.env
+Dockerfile
+docker-compose.yaml
