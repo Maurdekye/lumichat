@@ -24,7 +24,7 @@ services:
     ports:
       - "80:80"
     environment:
-      IDENTITY_SECRET: k3uJYxJY1vSxg9ow2yRIqaHFfsqb4JjIzkYck8A2qK2887yUQtEHshAO428775q5
+      IDENTITY_SECRET: change_me_____k3uJYxJY1vSxg9ow2yRIqaHFfsqb4JjIzkYck8A2qK2887yUQtEHshAO428775q5
       PORT: 80
       DATABASE_URL: postgres://postgres:root@db:5432/postgres
       REDIS_URL: redis://redis:6379

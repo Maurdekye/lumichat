@@ -15,7 +15,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY ./front/Cargo.toml ./front/Cargo.toml
 COPY ./front/index.html ./front/index.html
 
-# fake source files
+# fake source files for preload
 RUN mkdir src && \
     echo "fn main() {}" > src/main.rs && \
     cd front && \
@@ -30,9 +30,9 @@ RUN mkdir src && \
 
 # build project
 COPY ./ .
-# hack: have to update the source code to force a rebuild; just append a newline to main.rs
 RUN cd front && trunk build --release
-RUN echo "\n" >> front/src/main.rs
+# hack: have to update the source code to force a rebuild
+RUN touch front/src/main.rs
 RUN cd front && trunk build --release
 RUN cargo build --release
 # CMD ["./target/release/lumichat"]
