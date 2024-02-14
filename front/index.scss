@@ -1,0 +1,20 @@
+$primary: rgb(0, 0, 0);
+$secondary: rgb(29, 29, 29);
+$tertiary: rgb(64, 64, 64);
+$trim: rgb(196, 196, 196);
+
+.app {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  background-color: $primary;
+}
+
+.login {
+  width: min(10em, 90vw);
+  height: min(16em, 90vw);
+  background-color: $secondary;
+  border-color: $trim;
+  border-radius: 2em;
+}

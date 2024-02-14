@@ -1,22 +1,27 @@
 use yew::prelude::*;
 
-#[function_component]
-fn App() -> Html {
-    let counter = use_state(|| 0);
-    let onclick = {
-        let counter = counter.clone();
-        move |_| {
-            let value = *counter + 1;
-            counter.set(value);
-        }
-    };
+struct App {}
 
-    html! {
-        <div>
-            <h1>{ "some test" }</h1>
-            <button {onclick}>{ "+1" }</button>
-            <p>{ *counter }</p>
-        </div>
+impl Component for App {
+    type Message = ();
+    type Properties = ();
+
+    fn create(_ctx: &Context<Self>) -> Self {
+        App {}
+    }
+
+    fn view(&self, _ctx: &Context<Self>) -> Html {
+        html! {
+            <div class={"app"}>
+                <div class={"login"}>
+                    <label for="identifier">{"Username / Email"}</label>
+                    <input type="text" id="identifier" />
+                    <label for="password">{"Password"}</label>
+                    <input type="password" id="password" />
+                    <button>{"Login"}</button>
+                </div>
+            </div>
+        }
     }
 }
 
