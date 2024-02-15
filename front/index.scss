@@ -5,6 +5,10 @@ $input: rgb(156, 156, 156);
 $trim: rgb(196, 196, 196);
 $text: $trim;
 
+$success: rgb(35, 68, 34);
+$progress: rgb(48, 59, 69);
+$error: rgb(48, 32, 24);
+
 * {
   min-width: 0;
 }
@@ -34,6 +38,7 @@ html, body {
 
   .login-box {
     display: flex;
+    flex-direction: column;
     justify-content: center;
     align-items: center;
     width: min(13em, 90vw);
@@ -62,6 +67,26 @@ html, body {
     
       * {
         margin: 0.3em;
+      }
+    }
+
+    .login-message {
+      margin: 0.3em;
+      padding: 0.2em;
+      border: 1px solid $tertiary;
+      border-radius: 0.1em;
+      color: $text;
+
+      &.success {
+        background-color: $success;
+      }
+
+      &.progress {
+        background-color: $progress;
+      }
+
+      &.error {
+        background-color: $error;
       }
     }
   }
