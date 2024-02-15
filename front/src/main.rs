@@ -10,21 +10,11 @@ mod login {
     use gloo_console::log;
     use gloo_net::http::Request;
     use gloo_utils::format::JsValueSerdeExt;
-    use serde::{Deserialize, Serialize};
+    use serde::Serialize;
     use web_sys::HtmlInputElement;
     use yew::prelude::*;
 
-    #[derive(Serialize)]
-    struct LoginRequest {
-        identifier: String,
-        password: String,
-    }
-
-    #[derive(Serialize, Deserialize)]
-    struct LoginResponse {
-        success: bool,
-        message: String,
-    }
+    use shared::login;
 
     #[derive(Serialize)]
     pub enum Msg {
@@ -61,15 +51,14 @@ mod login {
                         password,
                     } = self.clone();
                     futures::spawn_local(async move {
-                        log!("Sending login request");
+                        let body = JsValue::from_serde(&login::Request {
+                            identifier,
+                            password,
+                        })
+                        .unwrap();
+                        log!("Sending login request:", &body);
                         let response = Request::post("/login")
-                            .body(
-                                JsValue::from_serde(&LoginRequest {
-                                    identifier,
-                                    password,
-                                })
-                                .unwrap(),
-                            )
+                            .body(body) // fix this with a stringify
                             .unwrap()
                             .send()
                             .await

@@ -11,18 +11,15 @@ use diesel::insert_into;
 use diesel::prelude::*;
 use diesel::r2d2::{self, ConnectionManager};
 use diesel::Insertable;
-use serde::{Deserialize, Serialize};
+use shared::signup::PasswordValidationError;
 
-use crate::model::User;
+use shared::{model::User, login, me, signup};
+
 use crate::schema::users::dsl::*;
 
-mod model;
 mod schema;
 
 pub type Pool = r2d2::Pool<ConnectionManager<PgConnection>>;
-
-#[derive(Serialize)]
-enum PasswordValidationError {}
 
 fn validate_password(_password: &str) -> Result<(), PasswordValidationError> {
     Ok(()) // no validation for now
@@ -36,22 +33,74 @@ fn check_password(user: &User, password: &str) -> bool {
     encrypt_password(&user.username, password) == user.password_hash
 }
 
-#[derive(Deserialize, Debug)]
-struct LoginRequest {
-    identifier: String,
-    password: String,
+
+#[derive(Insertable)]
+#[diesel(table_name = crate::schema::users)]
+pub struct NewUser<'a> {
+    username: &'a str,
+    email: &'a str,
+    password_hash: &'a str,
 }
 
-#[derive(Serialize)]
-struct LoginResponse {
-    success: bool,
-    message: String
+#[post("/signup")]
+async fn signup_handler(
+    request: HttpRequest,
+    body: web::Json<signup::Request>,
+    db: Data<Pool>,
+) -> impl Responder {
+    let mut db = db.get().expect("Database not available");
+
+    // decode request
+    let signup_request = body.into_inner();
+
+    // validate password
+    if let Err(validation_error) = validate_password(&signup_request.password) {
+        return HttpResponse::BadRequest().json(signup::Response {
+            success: false,
+            result: signup::ResponseType::InvalidPassword(validation_error)
+        });
+    }
+
+    // check for existing users
+    let user_query = users
+        .filter(username.eq(&signup_request.username))
+        .or_filter(email.eq(&signup_request.email))
+        .first::<User>(&mut db)
+        .optional()
+        .expect("Error querying database");
+
+    if let Some(_) = user_query {
+        return HttpResponse::BadRequest().json(signup::Response {
+            success: false,
+            result: signup::ResponseType::UserExists
+        });
+    }
+
+    // Prepare the new user data
+    let new_user = NewUser {
+        username: &signup_request.username,
+        email: &signup_request.email,
+        password_hash: &encrypt_password(&signup_request.username, &signup_request.password),
+    };
+
+    // Insert new user into the database
+    let new_user: User = insert_into(users)
+        .values(&new_user)
+        .get_result(&mut db)
+        .expect("Error inserting new user");
+
+    // Log user in
+    Identity::login(&request.extensions(), new_user.id.to_string()).unwrap();
+    HttpResponse::Ok().json(signup::Response {
+        success: true,
+        result: signup::ResponseType::Success(new_user)
+    })
 }
 
 #[post("/login")]
-async fn login(
+async fn login_handler(
     request: HttpRequest,
-    body: web::Json<LoginRequest>,
+    body: web::Json<login::Request>,
     db: Data<Pool>,
 ) -> impl Responder {
     println!("login request recieved");
@@ -73,45 +122,33 @@ async fn login(
         .expect("Error querying database");
 
     let Some(user) = user_query else {
-        return HttpResponse::Unauthorized().json(LoginResponse {
+        return HttpResponse::Unauthorized().json(login::Response {
             success: false,
-            message: "Invalid Password".to_string()
+            message: "Invalid Password".to_string(),
         });
     };
 
     // check password
     if !check_password(&user, &login_request.password) {
-        return HttpResponse::Unauthorized().json(LoginResponse {
+        return HttpResponse::Unauthorized().json(login::Response {
             success: false,
-            message: "Invalid Password".to_string()
+            message: "Invalid Password".to_string(),
         });
     }
 
     // log user in
     Identity::login(&request.extensions(), user.id.to_string()).unwrap();
-    HttpResponse::Ok().json(LoginResponse {
+    HttpResponse::Ok().json(login::Response {
         success: false,
-        message: "Successfully logged in".to_string()
+        message: "Successfully logged in".to_string(),
     })
 }
 
-#[derive(Serialize)]
-enum UserIdentityType {
-    Anonymous,
-    User,
-}
-
-#[derive(Serialize)]
-struct MeResponse {
-    identity: UserIdentityType,
-    user: Option<User>,
-}
-
 #[post("/me")]
-async fn me(user: Option<Identity>, db: Data<Pool>) -> impl Responder {
+async fn me_handler(user: Option<Identity>, db: Data<Pool>) -> impl Responder {
     let response = match user {
-        None => MeResponse {
-            identity: UserIdentityType::Anonymous,
+        None => me::Response {
+            identity: me::UserIdentity::Anonymous,
             user: None,
         },
         Some(user) => {
@@ -122,8 +159,8 @@ async fn me(user: Option<Identity>, db: Data<Pool>) -> impl Responder {
                 .first::<User>(&mut db)
                 .optional()
                 .unwrap();
-            MeResponse {
-                identity: UserIdentityType::User,
+            me::Response {
+                identity: me::UserIdentity::User,
                 user,
             }
         }
@@ -132,70 +169,9 @@ async fn me(user: Option<Identity>, db: Data<Pool>) -> impl Responder {
 }
 
 #[post("/logout")]
-async fn logout(user: Identity) -> impl Responder {
+async fn logout_handler(user: Identity) -> impl Responder {
     user.logout();
     HttpResponse::Ok()
-}
-
-#[derive(Deserialize)]
-struct SignupRequest {
-    username: String,
-    email: String,
-    password: String,
-}
-
-#[derive(Insertable)]
-#[diesel(table_name = crate::schema::users)]
-struct NewUser<'a> {
-    username: &'a str,
-    email: &'a str,
-    password_hash: &'a str,
-}
-
-#[post("/signup")]
-async fn signup(
-    request: HttpRequest,
-    body: web::Json<SignupRequest>,
-    db: Data<Pool>,
-) -> impl Responder {
-    let mut db = db.get().expect("Database not available");
-
-    // decode request
-    let signup_request = body.into_inner();
-
-    // validate password
-    if let Err(validation_error) = validate_password(&signup_request.password) {
-        return HttpResponse::BadRequest().json(validation_error);
-    }
-
-    // check for existing users
-    let user_query = users
-        .filter(username.eq(&signup_request.username))
-        .or_filter(email.eq(&signup_request.email))
-        .first::<User>(&mut db)
-        .optional()
-        .expect("Error querying database");
-
-    if let Some(_) = user_query {
-        return HttpResponse::BadRequest().json("User with username or email already exists");
-    }
-
-    // Prepare the new user data
-    let new_user = NewUser {
-        username: &signup_request.username,
-        email: &signup_request.email,
-        password_hash: &encrypt_password(&signup_request.username, &signup_request.password),
-    };
-
-    // Insert new user into the database
-    let new_user: User = insert_into(users)
-        .values(&new_user)
-        .get_result(&mut db)
-        .expect("Error inserting new user");
-
-    // Log user in
-    Identity::login(&request.extensions(), new_user.id.to_string()).unwrap();
-    HttpResponse::Ok().json("Successfully signed up")
 }
 
 #[actix_web::main]
@@ -234,6 +210,10 @@ async fn main() -> std::io::Result<()> {
                 redis.clone(),
                 Key::from(identity_secret.as_bytes()),
             ))
+            .service(signup_handler)
+            .service(login_handler)
+            .service(logout_handler)
+            .service(me_handler)
             .service(fs::Files::new("/", "./front/dist").index_file("index.html"))
     })
     .bind(host_addr)?
