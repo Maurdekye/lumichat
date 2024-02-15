@@ -32,10 +32,13 @@ docker compose up -d db redis
 
 # Build the frontend
 cd front
-trunk build
+trunk 
+cd ..
+
+# Set environment variables
+export $(cat .env | xargs)
 
 # Build & run the backend
-cd ..
 cargo run
 ```
 To redeploy changes to the backend, rerun `cargo run`. To redeploy changes to the frontend, `cd` into `front` and run `trunk build`. The new frontend changes should be accessible without restarting the backend; just force refresh the page with shift+F5.
