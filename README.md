@@ -10,33 +10,31 @@ To disable the app, run `docker compose down`. To redeploy again in the future, 
 
 To set up a local development environment in Linux, you'll need to install a few things:
 
-1. Install the [Rust programming language](https://www.rust-lang.org/tools/install)
-2. Install [Docker](https://docs.docker.com/engine/install/)
-3. Install the `libpq-dev` package:
+* The [Rust programming language](https://www.rust-lang.org/tools/install)
+* [Docker](https://docs.docker.com/engine/install/)
+
+Then, run the following commands:
+
 ```bash
+# Install the `libpq-dev` package
 apt-get update
 apt-get install -y libpq-dev
-```
-4. Install the trunk build tool and wasm build target:
-```bash
+
+# Install the trunk build tool and wasm build target
 cargo install --locked trunk
 rustup target add wasm32-unknown-unknown
-```
-5. Initialize the database:
-```bash
+
+# Initialize the database:
 ./setup_db.sh
-```
-6. Deploy auxiliary docker services:
-```bash
+
+# Deploy auxiliary docker services:
 docker compose up -d db redis
-```
-7. Build the frontend:
-```bash
+
+# Build the frontend:
 cd front
 trunk build
-```
-8. Build & run the backend:
-```bash
+
+# Build & run the backend:
 cd ..
 cargo run
 ```
