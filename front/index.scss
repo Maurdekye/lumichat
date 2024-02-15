@@ -1,20 +1,68 @@
 $primary: rgb(0, 0, 0);
 $secondary: rgb(29, 29, 29);
 $tertiary: rgb(64, 64, 64);
+$input: rgb(156, 156, 156);
 $trim: rgb(196, 196, 196);
+$text: $trim;
+
+* {
+  min-width: 0;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
 
 .app {
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  width: 100vw;
+  height: 100vh;
+  overflow: auto;
 
   background-color: $primary;
 }
 
-.login {
-  width: min(10em, 90vw);
-  height: min(16em, 90vw);
-  background-color: $secondary;
-  border-color: $trim;
-  border-radius: 2em;
+.login-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  
+  width: 100vw;
+  height: 100vh;
+  overflow: auto;
+
+  .login-box {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    width: min(13em, 90vw);
+    height: min(16em, 90vw);
+    background-color: $secondary;
+    border: 1px solid $trim;
+    border-radius: 0.5em;
+  
+    .login-form {
+      display: flex;
+      flex-flow: column;
+      align-items: center;
+      
+      label {
+        color: $text;
+      }
+  
+      input {
+        background-color: $input;
+      }
+  
+      button {
+        background-color: $tertiary;
+        border-radius: 0.1em;
+      }
+    
+      * {
+        margin: 0.3em;
+      }
+    }
+  }
 }

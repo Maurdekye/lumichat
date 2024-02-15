@@ -7,9 +7,9 @@ use actix_web::cookie::Key;
 use actix_web::web::{self, Data};
 use actix_web::{post, App, HttpMessage, HttpRequest, HttpResponse, HttpServer, Responder};
 use bcrypt::{hash, DEFAULT_COST};
+use diesel::insert_into;
 use diesel::prelude::*;
 use diesel::r2d2::{self, ConnectionManager};
-use diesel::insert_into;
 use diesel::Insertable;
 use serde::{Deserialize, Serialize};
 
@@ -36,10 +36,16 @@ fn check_password(user: &User, password: &str) -> bool {
     encrypt_password(&user.username, password) == user.password_hash
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct LoginRequest {
     identifier: String,
     password: String,
+}
+
+#[derive(Serialize)]
+struct LoginResponse {
+    success: bool,
+    message: String
 }
 
 #[post("/login")]
@@ -48,10 +54,12 @@ async fn login(
     body: web::Json<LoginRequest>,
     db: Data<Pool>,
 ) -> impl Responder {
+    println!("login request recieved");
     let mut db = db.get().expect("Database not available");
 
     // decode request
     let login_request = body.into_inner();
+    println!("login request body:\n{login_request:#?}");
 
     // check database
     let user_query = users
@@ -65,17 +73,26 @@ async fn login(
         .expect("Error querying database");
 
     let Some(user) = user_query else {
-        return HttpResponse::Unauthorized().json("Invalid Password");
+        return HttpResponse::Unauthorized().json(LoginResponse {
+            success: false,
+            message: "Invalid Password".to_string()
+        });
     };
 
     // check password
     if !check_password(&user, &login_request.password) {
-        return HttpResponse::Unauthorized().json("Invalid Password");
+        return HttpResponse::Unauthorized().json(LoginResponse {
+            success: false,
+            message: "Invalid Password".to_string()
+        });
     }
 
     // log user in
     Identity::login(&request.extensions(), user.id.to_string()).unwrap();
-    HttpResponse::Ok().json("Successfully logged in")
+    HttpResponse::Ok().json(LoginResponse {
+        success: false,
+        message: "Successfully logged in".to_string()
+    })
 }
 
 #[derive(Serialize)]
@@ -142,7 +159,7 @@ async fn signup(
     db: Data<Pool>,
 ) -> impl Responder {
     let mut db = db.get().expect("Database not available");
-    
+
     // decode request
     let signup_request = body.into_inner();
 
@@ -190,7 +207,7 @@ async fn main() -> std::io::Result<()> {
     let port = env::var("PORT").expect("PORT must be set");
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let redis_url = env::var("REDIS_URL").unwrap_or("redis://127.0.0.1:6379".to_string());
-    let host_addr = format!("0.0.0.0:{}", port);
+    let host_addr = format!("localhost:{}", port);
 
     println!("port: {port}");
     println!("database_url: {database_url}");
@@ -201,9 +218,11 @@ async fn main() -> std::io::Result<()> {
     let pool: Pool = r2d2::Pool::builder()
         .build(manager)
         .expect("Failed to create pool.");
+    println!("Connected to database");
 
     // setup redis connection
-    let redis_store = RedisSessionStore::new(redis_url).await.unwrap();
+    let redis = RedisSessionStore::new(redis_url).await.unwrap();
+    println!("Connected to redis");
 
     // serve app
     println!("Running on {}", host_addr);
@@ -212,7 +231,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(Data::new(pool.clone()))
             .wrap(IdentityMiddleware::default())
             .wrap(SessionMiddleware::new(
-                redis_store.clone(),
+                redis.clone(),
                 Key::from(identity_secret.as_bytes()),
             ))
             .service(fs::Files::new("/", "./front/dist").index_file("index.html"))
