@@ -19,8 +19,8 @@ apt-get install -y libpq-dev
 ```
 4. Install the trunk build tool and wasm build target:
 ```bash
-RUN cargo install --locked trunk
-RUN rustup target add wasm32-unknown-unknown
+cargo install --locked trunk
+rustup target add wasm32-unknown-unknown
 ```
 5. Initialize the database:
 ```bash
