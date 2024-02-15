@@ -22,18 +22,18 @@ apt-get install -y libpq-dev
 RUN cargo install --locked trunk
 RUN rustup target add wasm32-unknown-unknown
 ```
-5. Build the frontend:
-```bash
-cd front
-trunk build
-```
-6. Initialize the database:
+5. Initialize the database:
 ```bash
 ./setup_db.sh
 ```
-7. Deploy auxiliary docker services:
+6. Deploy auxiliary docker services:
 ```bash
 docker compose up -d db redis
+```
+7. Build the frontend:
+```bash
+cd front
+trunk build
 ```
 8. Build & run the backend:
 ```bash
