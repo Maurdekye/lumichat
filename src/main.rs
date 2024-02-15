@@ -6,20 +6,22 @@ use actix_session::{storage::RedisSessionStore, SessionMiddleware};
 use actix_web::cookie::Key;
 use actix_web::web::{self, Data};
 use actix_web::{post, App, HttpMessage, HttpRequest, HttpResponse, HttpServer, Responder};
-use bcrypt::{hash, DEFAULT_COST};
+use bcrypt::{hash, verify, DEFAULT_COST};
 use diesel::insert_into;
 use diesel::prelude::*;
 use diesel::r2d2::{self, ConnectionManager};
 use diesel::Insertable;
+use shared::model::{FullUser, User};
 use shared::signup::PasswordValidationError;
 
-use shared::{model::User, login, me, signup};
+use shared::{login, me, signup};
 
 use crate::schema::users::dsl::*;
 
 mod schema;
 
 pub type Pool = r2d2::Pool<ConnectionManager<PgConnection>>;
+pub type PoolConnection = r2d2::PooledConnection<ConnectionManager<PgConnection>>;
 
 fn validate_password(_password: &str) -> Result<(), PasswordValidationError> {
     Ok(()) // no validation for now
@@ -29,10 +31,35 @@ fn encrypt_password(name: &str, password: &str) -> String {
     hash(format!("{}#{}", name, password), DEFAULT_COST).expect("Error hashing password")
 }
 
-fn check_password(user: &User, password: &str) -> bool {
-    encrypt_password(&user.username, password) == user.password_hash
+fn check_password(user: &FullUser, password: &str) -> bool {
+    verify(
+        format!("{}#{}", user.username, password),
+        &user.password_hash,
+    )
+    .expect("Error decrypting password")
 }
 
+trait UserFromIdentity {
+    fn user(&self, db: &mut PoolConnection) -> Option<User>;
+}
+
+impl UserFromIdentity for Identity {
+    fn user(&self, db: &mut PoolConnection) -> Option<User> {
+        let user_id = self.id().ok()?.parse::<i32>().ok()?;
+        users
+            .find(user_id)
+            .first::<FullUser>(db)
+            .optional()
+            .ok()?
+            .map(Into::into)
+    }
+}
+
+impl UserFromIdentity for Option<Identity> {
+    fn user(&self, db: &mut PoolConnection) -> Option<User> {
+        self.as_ref().and_then(|ident| ident.user(db))
+    }
+}
 
 #[derive(Insertable)]
 #[diesel(table_name = crate::schema::users)]
@@ -48,128 +75,107 @@ async fn signup_handler(
     body: web::Json<signup::Request>,
     db: Data<Pool>,
 ) -> impl Responder {
-    let mut db = db.get().expect("Database not available");
-
     // decode request
-    let signup_request = body.into_inner();
+    let body = body.into_inner();
+    println!("/signup: {body:#?}");
 
     // validate password
-    if let Err(validation_error) = validate_password(&signup_request.password) {
-        return HttpResponse::BadRequest().json(signup::Response {
-            success: false,
-            result: signup::ResponseType::InvalidPassword(validation_error)
-        });
+    if let Err(validation_error) = validate_password(&body.password) {
+        return HttpResponse::BadRequest().json(signup::Response::Failure(
+            signup::FailureReason::InvalidPassword(validation_error),
+        ));
     }
 
     // check for existing users
+    let mut db = db.get().expect("Database not available");
     let user_query = users
-        .filter(username.eq(&signup_request.username))
-        .or_filter(email.eq(&signup_request.email))
-        .first::<User>(&mut db)
+        .filter(username.eq(&body.username))
+        .or_filter(email.eq(&body.email))
+        .first::<FullUser>(&mut db)
         .optional()
         .expect("Error querying database");
 
     if let Some(_) = user_query {
-        return HttpResponse::BadRequest().json(signup::Response {
-            success: false,
-            result: signup::ResponseType::UserExists
-        });
+        return HttpResponse::BadRequest()
+            .json(signup::Response::Failure(signup::FailureReason::UserExists));
     }
 
     // Prepare the new user data
     let new_user = NewUser {
-        username: &signup_request.username,
-        email: &signup_request.email,
-        password_hash: &encrypt_password(&signup_request.username, &signup_request.password),
+        username: &body.username,
+        email: &body.email,
+        password_hash: &encrypt_password(&body.username, &body.password),
     };
 
     // Insert new user into the database
-    let new_user: User = insert_into(users)
+    let new_user: FullUser = insert_into(users)
         .values(&new_user)
         .get_result(&mut db)
         .expect("Error inserting new user");
 
     // Log user in
     Identity::login(&request.extensions(), new_user.id.to_string()).unwrap();
-    HttpResponse::Ok().json(signup::Response {
-        success: true,
-        result: signup::ResponseType::Success(new_user)
-    })
+    HttpResponse::Ok().json(signup::Response::Success(new_user.into()))
 }
 
 #[post("/login")]
 async fn login_handler(
+    user: Option<Identity>,
     request: HttpRequest,
     body: web::Json<login::Request>,
     db: Data<Pool>,
 ) -> impl Responder {
-    println!("login request recieved");
-    let mut db = db.get().expect("Database not available");
+    // check if already logged in
+    if user.is_some() {
+        return HttpResponse::BadRequest().json(login::Response::Failure(
+            login::FailureReason::AlreadyLoggedIn,
+        ));
+    }
 
     // decode request
-    let login_request = body.into_inner();
-    println!("login request body:\n{login_request:#?}");
+    let body = body.into_inner();
+    println!("/login: {body:#?}");
 
-    // check database
+    // check database for user
+    let mut db = db.get().expect("Database not available");
     let user_query = users
-        .filter(
-            username
-                .eq(&login_request.identifier)
-                .or(email.eq(&login_request.identifier)),
-        )
-        .first::<User>(&mut db)
+        .filter(username.eq(&body.identifier).or(email.eq(&body.identifier)))
+        .first::<FullUser>(&mut db)
         .optional()
         .expect("Error querying database");
 
     let Some(user) = user_query else {
-        return HttpResponse::Unauthorized().json(login::Response {
-            success: false,
-            message: "Invalid Password".to_string(),
-        });
+        return HttpResponse::BadRequest().json(login::Response::Failure(
+            login::FailureReason::UserDoesNotExist,
+        ));
     };
 
     // check password
-    if !check_password(&user, &login_request.password) {
-        return HttpResponse::Unauthorized().json(login::Response {
-            success: false,
-            message: "Invalid Password".to_string(),
-        });
+    if !check_password(&user, &body.password) {
+        return HttpResponse::BadRequest().json(login::Response::Failure(
+            login::FailureReason::InvalidPassword,
+        ));
     }
 
     // log user in
     Identity::login(&request.extensions(), user.id.to_string()).unwrap();
-    HttpResponse::Ok().json(login::Response {
-        success: false,
-        message: "Successfully logged in".to_string(),
-    })
+    HttpResponse::Ok().json(login::Response::Success)
 }
 
 #[post("/me")]
-async fn me_handler(user: Option<Identity>, db: Data<Pool>) -> impl Responder {
-    let response = match user {
-        None => me::Response {
-            identity: me::UserIdentity::Anonymous,
-            user: None,
-        },
-        Some(user) => {
-            let mut db = db.get().expect("Database not available");
-            let user_id = user.id().unwrap().parse::<i32>().unwrap();
-            let user = users
-                .find(user_id)
-                .first::<User>(&mut db)
-                .optional()
-                .unwrap();
-            me::Response {
-                identity: me::UserIdentity::User,
-                user,
-            }
-        }
+async fn me_handler(identity: Option<Identity>, db: Data<Pool>) -> impl Responder {
+    println!("/me");
+    let mut db = db.get().expect("Database not available");
+    let response = match identity.user(&mut db) {
+        None => me::Response::Anonymous,
+        Some(user) => me::Response::User(user),
     };
-    web::Json(response)
+    HttpResponse::Ok().json(response)
 }
 
 #[post("/logout")]
 async fn logout_handler(user: Identity) -> impl Responder {
+    println!("/logout");
     user.logout();
     HttpResponse::Ok()
 }

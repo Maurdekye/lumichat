@@ -51,23 +51,20 @@ mod login {
                         password,
                     } = self.clone();
                     futures::spawn_local(async move {
-                        let body = JsValue::from_serde(&login::Request {
-                            identifier,
-                            password,
-                        })
-                        .unwrap();
-                        log!("Sending login request:", &body);
-                        let response = Request::post("/login")
-                            .body(body) // fix this with a stringify
+                        log!("Sending login request");
+                        let response: login::Response = Request::post("/login")
+                            .json(&login::Request {
+                                identifier,
+                                password,
+                            })
                             .unwrap()
                             .send()
                             .await
                             .expect("Unable to communicate with server")
-                            .text()
+                            .json()
                             .await
                             .expect("Unable to decode response");
-                        log!("response:", JsValue::from_str(&response));
-                        // log!("LoginResponse:", JsValue::from_serde(&response).unwrap());
+                        log!("LoginResponse:", JsValue::from_serde(&response).unwrap());
                     });
                     return false;
                 }

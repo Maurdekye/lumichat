@@ -3,11 +3,35 @@ pub mod model {
     use serde::{Deserialize, Serialize};
 
     #[derive(Queryable, Serialize, Deserialize, Clone, Debug)]
-    pub struct User {
+    pub struct FullUser {
         pub id: i32,
         pub username: String,
         pub email: String,
         pub password_hash: String,
+    }
+
+    #[derive(Serialize, Deserialize, Clone, Debug)]
+    pub struct User {
+        pub id: i32,
+        pub username: String,
+        pub email: String,
+    }
+
+    impl From<FullUser> for User {
+        fn from(
+            FullUser {
+                id,
+                username,
+                email,
+                ..
+            }: FullUser,
+        ) -> Self {
+            User {
+                id,
+                username,
+                email,
+            }
+        }
     }
 }
 
@@ -21,9 +45,16 @@ pub mod login {
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
-    pub struct Response {
-        pub success: bool,
-        pub message: String,
+    pub enum FailureReason {
+        AlreadyLoggedIn,
+        UserDoesNotExist,
+        InvalidPassword,
+    }
+
+    #[derive(Serialize, Deserialize, Clone, Debug)]
+    pub enum Response {
+        Success,
+        Failure(FailureReason)
     }
 }
 
@@ -33,15 +64,9 @@ pub mod me {
     use crate::model::User;
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
-    pub enum UserIdentity {
+    pub enum Response {
         Anonymous,
-        User,
-    }
-    
-    #[derive(Serialize, Deserialize, Clone, Debug)]
-    pub struct Response {
-        pub identity: UserIdentity,
-        pub user: Option<User>,
+        User(User)
     }
 }
 
@@ -61,15 +86,14 @@ pub mod signup {
     pub enum PasswordValidationError {}
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
-    pub enum ResponseType {
+    pub enum FailureReason {
         InvalidPassword(PasswordValidationError),
         UserExists,
-        Success(User),
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
-    pub struct Response {
-        pub success: bool,
-        pub result: ResponseType,
+    pub enum Response {
+        Success(User),
+        Failure(FailureReason),
     }
 }
