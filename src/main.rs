@@ -12,9 +12,9 @@ use diesel::prelude::*;
 use diesel::r2d2::{self, ConnectionManager};
 use diesel::Insertable;
 use shared::model::{FullUser, User};
-use shared::signup::PasswordValidationError;
+use shared::create_user::PasswordValidationError;
 
-use shared::{login, me, signup};
+use shared::{login, me, create_user};
 
 use crate::schema::users::dsl::*;
 
@@ -67,27 +67,35 @@ pub struct NewUser<'a> {
     username: &'a str,
     email: &'a str,
     password_hash: &'a str,
+    admin: bool,
 }
 
-#[post("/signup")]
-async fn signup_handler(
+#[post("/create-user")]
+async fn create_user_handler(
+    identity: Identity,
     request: HttpRequest,
-    body: web::Json<signup::Request>,
+    body: web::Json<create_user::Request>,
     db: Data<Pool>,
 ) -> impl Responder {
+    // check if operating user is an admin
+    let mut db = db.get().expect("Database not available");
+    let user = identity.user(&mut db).expect("Unable to load user profile");
+    if !user.admin {
+        return HttpResponse::Unauthorized().finish();
+    }
+
     // decode request
     let body = body.into_inner();
-    println!("/signup: {body:#?}");
+    println!("/create-user: {body:#?}");
 
     // validate password
     if let Err(validation_error) = validate_password(&body.password) {
-        return HttpResponse::BadRequest().json(signup::Response::Failure(
-            signup::FailureReason::InvalidPassword(validation_error),
+        return HttpResponse::BadRequest().json(create_user::Response::Failure(
+            create_user::FailureReason::InvalidPassword(validation_error),
         ));
     }
 
     // check for existing users
-    let mut db = db.get().expect("Database not available");
     let user_query = users
         .filter(username.eq(&body.username))
         .or_filter(email.eq(&body.email))
@@ -97,7 +105,7 @@ async fn signup_handler(
 
     if let Some(_) = user_query {
         return HttpResponse::BadRequest()
-            .json(signup::Response::Failure(signup::FailureReason::UserExists));
+            .json(create_user::Response::Failure(create_user::FailureReason::UserExists));
     }
 
     // Prepare the new user data
@@ -105,6 +113,7 @@ async fn signup_handler(
         username: &body.username,
         email: &body.email,
         password_hash: &encrypt_password(&body.username, &body.password),
+        admin: false,
     };
 
     // Insert new user into the database
@@ -115,7 +124,7 @@ async fn signup_handler(
 
     // Log user in
     Identity::login(&request.extensions(), new_user.id.to_string()).unwrap();
-    HttpResponse::Ok().json(signup::Response::Success(new_user.into()))
+    HttpResponse::Ok().json(create_user::Response::Success(new_user.into()))
 }
 
 #[post("/login")]
@@ -216,7 +225,7 @@ async fn main() -> std::io::Result<()> {
                 redis.clone(),
                 Key::from(identity_secret.as_bytes()),
             ))
-            .service(signup_handler)
+            .service(create_user_handler)
             .service(login_handler)
             .service(logout_handler)
             .service(me_handler)

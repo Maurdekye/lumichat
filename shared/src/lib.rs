@@ -8,6 +8,7 @@ pub mod model {
         pub username: String,
         pub email: String,
         pub password_hash: String,
+        pub admin: bool,
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -15,6 +16,7 @@ pub mod model {
         pub id: i32,
         pub username: String,
         pub email: String,
+        pub admin: bool,
     }
 
     impl From<FullUser> for User {
@@ -23,6 +25,7 @@ pub mod model {
                 id,
                 username,
                 email,
+                admin,
                 ..
             }: FullUser,
         ) -> Self {
@@ -30,6 +33,7 @@ pub mod model {
                 id,
                 username,
                 email,
+                admin,
             }
         }
     }
@@ -72,7 +76,7 @@ pub mod me {
     }
 }
 
-pub mod signup {
+pub mod create_user {
     use serde::{Deserialize, Serialize};
 
     use crate::model::User;
