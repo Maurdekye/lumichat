@@ -5,7 +5,7 @@ use actix_identity::{Identity, IdentityMiddleware};
 use actix_session::{storage::RedisSessionStore, SessionMiddleware};
 use actix_web::cookie::Key;
 use actix_web::web::{self, Data};
-use actix_web::{post, App, HttpMessage, HttpRequest, HttpResponse, HttpServer, Responder};
+use actix_web::{get, post, App, HttpMessage, HttpRequest, HttpResponse, HttpServer, Responder};
 use bcrypt::{hash, verify, DEFAULT_COST};
 use diesel::insert_into;
 use diesel::prelude::*;
@@ -159,10 +159,10 @@ async fn login_handler(
 
     // log user in
     Identity::login(&request.extensions(), user.id.to_string()).unwrap();
-    HttpResponse::Ok().json(login::Response::Success)
+    HttpResponse::Ok().json(login::Response::Success(user.into()))
 }
 
-#[post("/me")]
+#[get("/me")]
 async fn me_handler(identity: Option<Identity>, db: Data<Pool>) -> impl Responder {
     println!("/me");
     let mut db = db.get().expect("Database not available");

@@ -1,8 +1,11 @@
 use std::time::Duration;
 
+use gloo_console::log;
+use gloo_net::http::Request;
+use shared::{me, model::User};
 use yew::prelude::*;
 
-use crate::login::Login;
+use crate::{login::Login, session::Session};
 
 use gloo_timers::future::TimeoutFuture as Timeout;
 
@@ -24,7 +27,7 @@ mod login {
     use web_sys::HtmlInputElement;
     use yew::prelude::*;
 
-    use shared::login;
+    use shared::{login, model::User};
 
     use super::sleep;
 
@@ -35,7 +38,12 @@ mod login {
         Request,
         Response(login::Response),
         ClearMessage,
-        Reload,
+        Login(User),
+    }
+
+    #[derive(Clone, PartialEq, Properties)]
+    pub struct Props {
+        pub on_login: Callback<User>,
     }
 
     #[derive(Clone)]
@@ -51,10 +59,9 @@ mod login {
         password: String,
         message: Option<InfoMessage>,
     }
-
     impl Component for Login {
         type Message = Msg;
-        type Properties = ();
+        type Properties = Props;
 
         fn create(_ctx: &Context<Self>) -> Self {
             Login {
@@ -65,7 +72,6 @@ mod login {
         }
 
         fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
-            log!("msg:", JsValue::from_serde(&msg).unwrap());
             match msg {
                 Msg::UpdateIdentifier(identifier) => self.identifier = identifier,
                 Msg::UpdatePassword(password) => self.password = password,
@@ -76,7 +82,6 @@ mod login {
                         ..
                     } = self.clone();
                     ctx.link().send_future(async {
-                        log!("Sending login request");
                         let response: login::Response = Request::post("/login")
                             .json(&login::Request {
                                 identifier,
@@ -85,11 +90,10 @@ mod login {
                             .unwrap()
                             .send()
                             .await
-                            .expect("Unable to communicate with server")
+                            .expect("Unable to post /login")
                             .json()
                             .await
-                            .expect("Unable to decode response");
-                        log!("Login response:", JsValue::from_serde(&response).unwrap());
+                            .expect("Unexpected response");
                         Msg::Response(response)
                     });
                     self.message = Some(InfoMessage::Progress("Logging in...".to_string()))
@@ -108,17 +112,20 @@ mod login {
                         Msg::ClearMessage
                     });
                 }
-                Msg::Response(login::Response::Success) => {
+                Msg::Response(login::Response::Success(user)) => {
                     self.message = Some(InfoMessage::Success("Logged in!".to_string()));
                     ctx.link().send_future(async {
                         sleep(Duration::from_secs(1)).await;
-                        Msg::Reload
+                        Msg::Login(user)
                     });
                 }
                 Msg::ClearMessage => {
                     self.message = None;
                 }
-                Msg::Reload => {}
+                Msg::Login(user) => {
+                    log!("Logging in user", JsValue::from_serde(&user).unwrap());
+                    ctx.props().on_login.emit(user);
+                }
             };
             true
         }
@@ -174,20 +181,110 @@ mod login {
     }
 }
 
-struct App {}
+mod session {
+    use shared::model::User;
+    use yew::prelude::*;
+
+    pub struct Session {}
+
+    #[derive(Clone, PartialEq, Properties)]
+    pub struct Props {
+        pub user: User,
+    }
+
+    impl Component for Session {
+        type Message = ();
+        type Properties = Props;
+
+        fn create(_ctx: &yew::prelude::Context<Self>) -> Self {
+            Self {}
+        }
+
+        fn view(&self, ctx: &yew::prelude::Context<Self>) -> yew::prelude::Html {
+            html! {
+                <div>{format!("Hello {}!", &ctx.props().user.username)}</div>
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+enum IdentityState {
+    Loading,
+    Anonymous,
+    User(User),
+}
+
+#[derive(Debug)]
+enum Msg {
+    SetIdentity(IdentityState),
+}
+
+struct App {
+    identity_state: IdentityState,
+}
 
 impl Component for App {
-    type Message = ();
+    type Message = Msg;
     type Properties = ();
 
     fn create(_ctx: &Context<Self>) -> Self {
-        App {}
+        App {
+            identity_state: IdentityState::Loading,
+        }
     }
 
-    fn view(&self, _ctx: &Context<Self>) -> Html {
+    fn update(&mut self, _ctx: &Context<Self>, msg: Self::Message) -> bool {
+        log!("app message:", format!("{msg:#?}"));
+        match msg {
+            Msg::SetIdentity(identity_state) => {
+                self.identity_state = identity_state;
+            }
+        }
+        true
+    }
+
+    fn view(&self, ctx: &Context<Self>) -> Html {
+        if let IdentityState::Loading = self.identity_state {
+            ctx.link().send_future(async {
+                let response: me::Response = Request::get("/me")
+                    .build()
+                    .unwrap()
+                    .send()
+                    .await
+                    .expect("Unable to get /me")
+                    .json()
+                    .await
+                    .expect("Unexpected response");
+                match response {
+                    me::Response::Anonymous => Msg::SetIdentity(IdentityState::Anonymous),
+                    me::Response::User(user) => Msg::SetIdentity(IdentityState::User(user)),
+                }
+            });
+        }
         html! {
             <div class={"app"}>
-                <Login />
+                {
+                    match &self.identity_state {
+                        IdentityState::Loading =>
+                            html! {
+                                <div class={"loading"}>{"Loading..."}</div>
+                            },
+                        IdentityState::Anonymous => {
+                            let on_login = ctx.link().callback(|user| Msg::SetIdentity(IdentityState::User(user)));
+                            html! {
+                                <Login {on_login} />
+                            }
+                        },
+                        IdentityState::User(user) => {
+                            let user = user.clone();
+                            html! {
+                                <Session {user}/>
+                            }
+                        }
+
+                    }
+                }
             </div>
         }
     }

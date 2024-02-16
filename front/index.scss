@@ -11,6 +11,7 @@ $error: rgb(48, 32, 24);
 
 * {
   min-width: 0;
+  color: $text;
 }
 
 html, body {
@@ -58,6 +59,7 @@ html, body {
   
       input {
         background-color: $input;
+        color: black;
       }
   
       button {

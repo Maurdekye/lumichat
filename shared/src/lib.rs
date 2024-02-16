@@ -10,7 +10,7 @@ pub mod model {
         pub password_hash: String,
     }
 
-    #[derive(Serialize, Deserialize, Clone, Debug)]
+    #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
     pub struct User {
         pub id: i32,
         pub username: String,
@@ -38,6 +38,8 @@ pub mod model {
 pub mod login {
     use serde::{Deserialize, Serialize};
 
+    use crate::model::User;
+
     #[derive(Serialize, Deserialize, Clone, Debug)]
     pub struct Request {
         pub identifier: String,
@@ -53,7 +55,7 @@ pub mod login {
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
     pub enum Response {
-        Success,
+        Success(User),
         Failure(FailureReason)
     }
 }
