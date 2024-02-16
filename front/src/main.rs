@@ -182,27 +182,55 @@ mod login {
 }
 
 mod session {
+    use gloo_net::http::Request;
     use shared::model::User;
     use yew::prelude::*;
 
     pub struct Session {}
 
+    pub enum Msg {
+        Logout,
+    }
+
     #[derive(Clone, PartialEq, Properties)]
     pub struct Props {
         pub user: User,
+        pub on_logout: Callback<()>,
     }
 
     impl Component for Session {
-        type Message = ();
+        type Message = Msg;
         type Properties = Props;
 
         fn create(_ctx: &yew::prelude::Context<Self>) -> Self {
             Self {}
         }
 
+        fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
+            match msg {
+                Msg::Logout => {
+                    let on_logout = ctx.props().on_logout.clone();
+                    wasm_bindgen_futures::spawn_local(async move {
+                        let response = Request::post("/logout")
+                            .build()
+                            .unwrap()
+                            .send()
+                            .await
+                            .expect("Unable to post /logout");
+                        assert_eq!(response.status(), 200);
+                        on_logout.emit(());
+                    });
+                }
+            };
+            true
+        }
+
         fn view(&self, ctx: &yew::prelude::Context<Self>) -> yew::prelude::Html {
             html! {
-                <div>{format!("Hello {}!", &ctx.props().user.username)}</div>
+                <div>
+                    <div>{format!("Hello {}!", &ctx.props().user.username)}</div>
+                    <button onclick={ctx.link().callback(|_| Msg::Logout)}>{"Logout"}</button>
+                </div>
             }
         }
     }
@@ -278,8 +306,9 @@ impl Component for App {
                         },
                         IdentityState::User(user) => {
                             let user = user.clone();
+                            let on_logout = ctx.link().callback(|_| Msg::SetIdentity(IdentityState::Anonymous));
                             html! {
-                                <Session {user}/>
+                                <Session {user} {on_logout}/>
                             }
                         }
 

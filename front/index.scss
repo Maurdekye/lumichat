@@ -61,11 +61,6 @@ html, body {
         background-color: $input;
         color: black;
       }
-  
-      button {
-        background-color: $tertiary;
-        border-radius: 0.1em;
-      }
     
       * {
         margin: 0.3em;
@@ -92,4 +87,9 @@ html, body {
       }
     }
   }
+}
+ 
+button {
+  background-color: $tertiary;
+  border-radius: 0.1em;
 }
