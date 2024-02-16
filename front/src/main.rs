@@ -13,6 +13,53 @@ fn sleep(duration: Duration) -> Timeout {
     Timeout::new(duration.as_millis() as u32)
 }
 
+macro_rules! wait {
+    ($secs:literal seconds) => {
+        sleep(Duration::from_secs($secs)).await
+    };
+    ($millis:literal millis) => {
+        sleep(Duration::from_millis($millis)).await
+    };
+}
+
+macro_rules! get {
+    ($route:literal) => {
+        get!(@Request::get($route).build(), $route)
+    };
+    ($route:literal, $body:expr) => {
+        get!(@Request::get($route).json(&$body), $route)
+    };
+    (@$builder:expr, $route:literal) => {
+        $builder
+            .unwrap()
+            .send()
+            .await
+            .expect(format!("Unable to get {}", $route).as_str())
+    };
+}
+
+macro_rules! post {
+    ($route:literal) => {
+        post!(@Request::post($route).build(), $route)
+    };
+    ($route:literal, $body:expr) => {
+        post!(@Request::post($route).json(&$body), $route)
+    };
+    (@$builder:expr, $route:literal) => {
+        $builder
+            .unwrap()
+            .send()
+            .await
+            .expect(format!("Unable to post {}", $route).as_str())
+    };
+}
+
+macro_rules! json {
+    ($request:expr) => {{
+        $request.json().await.expect("Unexpected response")
+    }};
+}
+
 mod login {
 
     extern crate wasm_bindgen_futures as futures;
@@ -82,18 +129,13 @@ mod login {
                         ..
                     } = self.clone();
                     ctx.link().send_future(async {
-                        let response: login::Response = Request::post("/login")
-                            .json(&login::Request {
+                        let response: login::Response = json!(post!(
+                            "/login",
+                            login::Request {
                                 identifier,
                                 password,
-                            })
-                            .unwrap()
-                            .send()
-                            .await
-                            .expect("Unable to post /login")
-                            .json()
-                            .await
-                            .expect("Unexpected response");
+                            }
+                        ));
                         Msg::Response(response)
                     });
                     self.message = Some(InfoMessage::Progress("Logging in...".to_string()))
@@ -108,14 +150,14 @@ mod login {
                     };
                     self.message = Some(InfoMessage::Error(message));
                     ctx.link().send_future(async {
-                        sleep(Duration::from_secs(5)).await;
+                        wait!(5 seconds);
                         Msg::ClearMessage
                     });
                 }
                 Msg::Response(login::Response::Success(user)) => {
                     self.message = Some(InfoMessage::Success("Logged in!".to_string()));
                     ctx.link().send_future(async {
-                        sleep(Duration::from_secs(1)).await;
+                        wait!(500 millis);
                         Msg::Login(user)
                     });
                 }
@@ -211,12 +253,7 @@ mod session {
                 Msg::Logout => {
                     let on_logout = ctx.props().on_logout.clone();
                     wasm_bindgen_futures::spawn_local(async move {
-                        let response = Request::post("/logout")
-                            .build()
-                            .unwrap()
-                            .send()
-                            .await
-                            .expect("Unable to post /logout");
+                        let response = post!("/logout");
                         assert_eq!(response.status(), 200);
                         on_logout.emit(());
                     });
@@ -275,15 +312,7 @@ impl Component for App {
     fn view(&self, ctx: &Context<Self>) -> Html {
         if let IdentityState::Loading = self.identity_state {
             ctx.link().send_future(async {
-                let response: me::Response = Request::get("/me")
-                    .build()
-                    .unwrap()
-                    .send()
-                    .await
-                    .expect("Unable to get /me")
-                    .json()
-                    .await
-                    .expect("Unexpected response");
+                let response: me::Response = json!(get!("/me"));
                 match response {
                     me::Response::Anonymous => Msg::SetIdentity(IdentityState::Anonymous),
                     me::Response::User(user) => Msg::SetIdentity(IdentityState::User(user)),

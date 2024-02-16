@@ -11,10 +11,11 @@ use diesel::insert_into;
 use diesel::prelude::*;
 use diesel::r2d2::{self, ConnectionManager};
 use diesel::Insertable;
-use shared::model::{FullUser, User};
+use model::FullUser;
 use shared::create_user::PasswordValidationError;
+use shared::model::User;
 
-use shared::{login, me, create_user};
+use shared::{create_user, login, me};
 
 use crate::schema::users::dsl::*;
 
@@ -24,6 +25,40 @@ pub type Pool = r2d2::Pool<ConnectionManager<PgConnection>>;
 pub type PoolConnection = r2d2::PooledConnection<ConnectionManager<PgConnection>>;
 
 struct AdminSignup(bool);
+
+mod model {
+    use diesel::deserialize::Queryable;
+    use serde::{Deserialize, Serialize};
+    use shared::model::User;
+
+    #[derive(Queryable, Serialize, Deserialize, Clone, Debug)]
+    pub struct FullUser {
+        pub id: i32,
+        pub username: String,
+        pub email: String,
+        pub password_hash: String,
+        pub admin: bool,
+    }
+
+    impl From<FullUser> for User {
+        fn from(
+            FullUser {
+                id,
+                username,
+                email,
+                admin,
+                ..
+            }: FullUser,
+        ) -> Self {
+            User {
+                id,
+                username,
+                email,
+                admin,
+            }
+        }
+    }
+}
 
 fn validate_password(_password: &str) -> Result<(), PasswordValidationError> {
     Ok(()) // no validation for now
@@ -100,7 +135,7 @@ async fn create_user_handler(
     if !user.admin {
         return HttpResponse::Unauthorized().finish();
     }
-    
+
     // proceed to user creation
     create_user_inner(body, &mut db, false).await
 }
@@ -130,8 +165,9 @@ async fn create_user_inner(
         .expect("Error querying database");
 
     if let Some(_) = user_query {
-        return HttpResponse::BadRequest()
-            .json(create_user::Response::Failure(create_user::FailureReason::UserExists));
+        return HttpResponse::BadRequest().json(create_user::Response::Failure(
+            create_user::FailureReason::UserExists,
+        ));
     }
 
     // Prepare the new user data
