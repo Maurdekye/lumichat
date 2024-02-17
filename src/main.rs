@@ -1,5 +1,4 @@
 use std::env;
-use std::time::Instant;
 
 use actix_files as fs;
 use actix_identity::{Identity, IdentityMiddleware};
@@ -18,9 +17,9 @@ use shared::create_user::PasswordValidationError;
 use shared::model::{AuthorType, Chat, FullUser, Message};
 use shared::{create_user, login, me, new_chat};
 
-use shared::schema::users::dsl::*;
 use shared::schema::chats::dsl::*;
 use shared::schema::messages::dsl::*;
+use shared::schema::users::dsl::*;
 
 pub type Pool = r2d2::Pool<ConnectionManager<PgConnection>>;
 pub type PoolConnection = r2d2::PooledConnection<ConnectionManager<PgConnection>>;
@@ -31,16 +30,12 @@ fn validate_password(_password: &str) -> Result<(), PasswordValidationError> {
     Ok(()) // no validation for now
 }
 
-fn encrypt_password(user_name: &str, password: &str) -> String {
-    hash(format!("{}#{}", user_name, password), DEFAULT_COST).expect("Error hashing password")
+fn encrypt_password(password: &str) -> String {
+    hash(password, DEFAULT_COST).expect("Error hashing password")
 }
 
 fn check_password(user: &FullUser, password: &str) -> bool {
-    verify(
-        format!("{}#{}", user.username, password),
-        &user.password_hash,
-    )
-    .expect("Error decrypting password")
+    verify(password, &user.password_hash).expect("Error decrypting password")
 }
 
 trait FullUserFromIdentity {
@@ -143,7 +138,7 @@ async fn create_user_inner(
     let new_user = NewFullUser {
         username: &body.username,
         email: &body.email,
-        password_hash: &encrypt_password(&body.username, &body.password),
+        password_hash: &encrypt_password(&body.password),
         admin: make_admin,
     };
 
@@ -244,7 +239,6 @@ async fn new_chat_handler(
     db: Data<Pool>,
     body: web::Json<new_chat::Request>,
 ) -> impl Responder {
-
     // decode request
     let body = body.into_inner();
     println!("/new-chat: {body:#?}");
@@ -256,7 +250,7 @@ async fn new_chat_handler(
     let new_chat = NewChat {
         name: "New Chat",
         owner: user_id,
-        created: now.clone()
+        created: now.clone(),
     };
     let new_chat: Chat = insert_into(chats)
         .values(&new_chat)
