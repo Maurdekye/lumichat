@@ -82,90 +82,101 @@ html, body {
 
 .session {
   display: flex;
-  flex-flow: column;
-  
+  flex-flow: row;
   width: 100vw;
   height: 100vh;
-  overflow: auto;
+  overflow: hidden;
 
-  .navbar {
-    height: 4em;
-    border: 1px solid $trim;
+  .sidebar {
     display: flex;
-    flex-flow: row;
-    align-items: center;
-    background-color: $secondary;
+    flex-flow: column-reverse;
+    width: 14em;
+    border: 1px solid $tertiary;
+    overflow-x: hidden;
 
-    * {
-      margin: 1em;
+    transition: width 0.6s, border-width 0.6s;
+
+    &.collapsed {
+      width: 0;
+      border-width: 0;
     }
-  }
 
-  .content {
-    flex: 1;
-    display: flex;
-    flex-flow: row;
+    .profile {
+      display: flex;
+      height: 4em;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid $tertiary;
+    }
 
-    .sidebar {
+    .chats-list {
+      flex: 1;
       display: flex;
       flex-flow: column;
+      overflow-y: auto;
+      max-height: 100%;
 
-      width: 14em;
-      border: 1px solid $tertiary;
-
-      .chat {
+      .chat, .new-chat {
         height: 3em;
         align-items: center;
-
+  
         border: 1px solid $tertiary;
-
+  
         * {
           margin: 1em;
         }
       }
     }
+  }
 
-    .chat-window {
+  .sidebar-toggle {
+    width: 2em;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .chat-window {
+    flex: 1;
+    display: flex;
+    flex-flow: column-reverse;
+    overflow: hidden;
+
+    .chat-messages {
       flex: 1;
       display: flex;
-      flex-flow: column-reverse;
+      flex-flow: column;
+      overflow-y: auto;
+      padding: 0.5em;
+      max-height: 100%;
 
-      .chat-messages {
-        flex: 1;
+      .message-row {
+        margin: 0.8em;
         display: flex;
-        flex-flow: column;
-        overflow-y: auto;
-        padding: 0.5em;
-        max-height: 100%;
 
-        .message-row {
-          margin: 0.8em;
-          display: flex;
+        &.user {
+          flex-flow: row-reverse;
+        }
 
-          &.user {
-            flex-flow: row-reverse;
-          }
+        &.assistant {
+          flex-flow: row;
+        }
 
-          &.assistant {
-            flex-flow: row;
-          }
-
-          .message {
-            max-width: 80%;
-          }
+        .message {
+          max-width: 80%;
         }
       }
+    }
 
-      .chat-input-container {
-        display: flex;
-        height: 7em;
+    .chat-input-container {
+      display: flex;
+      height: 7em;
 
-        justify-content: center;
-        align-items: center;
+      justify-content: center;
+      align-items: center;
 
-        .chat-input {
-          width: 80%;
-        }
+      .chat-input {
+        width: 80%;
       }
     }
   }

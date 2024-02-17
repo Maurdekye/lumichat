@@ -258,7 +258,7 @@ async fn main() -> std::io::Result<()> {
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let redis_url = env::var("REDIS_URL").unwrap_or("redis://127.0.0.1:6379".to_string());
     let admin_signup = env::var("ADMIN_SIGNUP") == Ok("TRUE".to_string());
-    let host_addr = format!("localhost:{}", port);
+    let host_addr = format!("0.0.0.0:{}", port);
 
     println!("port: {port}");
     println!("database_url: {database_url}");

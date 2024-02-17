@@ -16,6 +16,7 @@ use gloo_timers::future::TimeoutFuture as Timeout;
 fn sleep(duration: Duration) -> Timeout {
     Timeout::new(duration.as_millis() as u32)
 }
+
 macro_rules! dbg_log {
     ($msg:literal$(, $($obj:expr),*)?) => {
         log!($msg, $(JsValue::from_serde(&$obj).unwrap()),*)
@@ -27,19 +28,19 @@ macro_rules! wait {
         wait!(1 seconds)
     };
     ($secs:literal seconds) => {
-        sleep(Duration::from_secs($secs)).await
+        crate::sleep(std::time::Duration::from_secs($secs)).await
     };
     ($millis:literal millis) => {
-        sleep(Duration::from_millis($millis)).await
+        crate::sleep(std::time::Duration::from_millis($millis)).await
     };
 }
 
 macro_rules! get {
     ($route:literal) => {
-        get!(@Request::get($route).build(), $route)
+        get!(@gloo_net::http::Request::get($route).build(), $route)
     };
     ($route:literal, $body:expr) => {
-        get!(@Request::get($route).json(&$body), $route)
+        get!(@gloo_net::http::Request::get($route).json(&$body), $route)
     };
     (@$builder:expr, $route:literal) => {
         $builder
@@ -52,10 +53,10 @@ macro_rules! get {
 
 macro_rules! post {
     ($route:literal) => {
-        post!(@Request::post($route).build(), $route)
+        post!(@gloo_net::http::Request::post($route).build(), $route)
     };
     ($route:literal, $body:expr) => {
-        post!(@Request::post($route).json(&$body), $route)
+        post!(@gloo_net::http::Request::post($route).json(&$body), $route)
     };
     (@$builder:expr, $route:literal) => {
         $builder
@@ -230,14 +231,46 @@ mod login {
 }
 
 mod session {
+    use std::{cell::RefCell, rc::Rc};
+
     use gloo_net::http::Request;
     use shared::model::User;
+    use web_sys::HtmlInputElement;
     use yew::prelude::*;
 
-    pub struct Session {}
+    pub enum Author {
+        User,
+        Assistant,
+    }
+
+    pub struct ChatMessage {
+        author: Author,
+        content: String,
+    }
+
+    pub struct Chat {
+        name: String,
+        messages: Vec<ChatMessage>,
+    }
+
+    pub struct Session {
+        sidebar: bool,
+        chats: Vec<Rc<RefCell<Chat>>>,
+        current_chat: Option<Rc<RefCell<Chat>>>,
+        message_input: String,
+    }
 
     pub enum Msg {
         Logout,
+        ToggleSidebar,
+        NewChat,
+        SelectChat(Rc<RefCell<Chat>>),
+        UpdateMessage(String),
+        SubmitMessage,
+        AssistantMessage {
+            content: String,
+            chat: Rc<RefCell<Chat>>,
+        },
     }
 
     #[derive(Clone, PartialEq, Properties)]
@@ -251,7 +284,12 @@ mod session {
         type Properties = Props;
 
         fn create(_ctx: &yew::prelude::Context<Self>) -> Self {
-            Self {}
+            Self {
+                sidebar: true,
+                chats: Vec::new(),
+                current_chat: None,
+                message_input: String::new(),
+            }
         }
 
         fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
@@ -264,6 +302,50 @@ mod session {
                         on_logout.emit(());
                     });
                 }
+                Msg::ToggleSidebar => {
+                    self.sidebar = !self.sidebar;
+                }
+                Msg::NewChat => self.current_chat = None,
+                Msg::SelectChat(chat) => self.current_chat = Some(chat),
+                Msg::UpdateMessage(message) => {
+                    self.message_input = message;
+                }
+                Msg::SubmitMessage => {
+                    let new_message = ChatMessage {
+                        author: Author::User,
+                        content: self.message_input.clone(),
+                    };
+                    match &self.current_chat {
+                        Some(chat) => chat.borrow_mut().messages.push(new_message),
+                        None => {
+                            let new_chat = Rc::new(RefCell::new(Chat {
+                                name: "New Chat".to_string(),
+                                messages: vec![new_message],
+                            }));
+                            self.chats.push(new_chat.clone());
+                            self.current_chat = Some(new_chat);
+                        }
+                    }
+                    self.message_input = String::new();
+
+                    // simulate mock assistant response after delay
+                    if let Some(chat) = &mut self.current_chat {
+                        let chat = chat.clone();
+                        ctx.link().send_future(async {
+                            wait!(1 second);
+                            Msg::AssistantMessage {
+                                content: "Lorum Ipsum Dolor Sit Amet".to_string(),
+                                chat,
+                            }
+                        });
+                    }
+                }
+                Msg::AssistantMessage { content, chat } => {
+                    chat.borrow_mut().messages.push(ChatMessage {
+                        author: Author::Assistant,
+                        content,
+                    });
+                }
             };
             true
         }
@@ -271,34 +353,73 @@ mod session {
         fn view(&self, ctx: &yew::prelude::Context<Self>) -> yew::prelude::Html {
             html! {
                 <div class="session">
-                    <div class="navbar">
-                        <p>{format!("Hello {}!", &ctx.props().user.username)}</p>
-                        <button onclick={ctx.link().callback(|_| Msg::Logout)}>{"Logout"}</button>
-                    </div>
-                    <div class="content">
-                        <div class="sidebar">
+                    <div class={if self.sidebar { "sidebar" } else { "sidebar collapsed" }}>
+                        <div class="profile">
+                            <button onclick={ctx.link().callback(|_| Msg::Logout)}>{"Logout"}</button>
+                        </div>
+                        <div class="chats-list">
                             {
-                                (1..=10).map(|i| html! {
-                                    <div class="chat"><p>{format!("chat {i}")}</p></div>
+                                self.chats.iter().map(|chat| {
+                                    let onclick = {
+                                        // yes, i know what you're thinking, but both clones are necessary
+                                        // the first is so that the callback closure has its own copy
+                                        // and the second is so that the closure can give out a unique copy
+                                        // each time it's called
+                                        let chat = chat.clone();
+                                        ctx.link().callback(move |_| Msg::SelectChat(chat.clone()))
+                                    };
+                                    html! {
+                                        <div class="chat" {onclick}><p>{&chat.borrow().name}</p></div>
+                                    }
                                 }).collect::<Vec<_>>()
                             }
+                            <div class="new-chat">
+                                <button onclick={ctx.link().callback(|_| Msg::NewChat)}>{" + New Chat"}</button>
+                            </div>
                         </div>
-                        <div class="chat-window">
-                            <div class="chat-input-container">
-                                <input class="chat-input" />
-                            </div>
-                            <div class="chat-messages">
-                                {
-                                    (1..=10).flat_map(|_| vec![
-                                        html! {
-                                            <div class="message-row user"><div class="message">{"Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat."}</div></div>
-                                        },
-                                        html!{
-                                            <div class="message-row assistant"><div class="message">{" Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum."}</div></div>
-                                        }
-                                    ]).collect::<Vec<_>>()
+                    </div>
+                    <div class="sidebar-toggle">
+                        <button onclick={ctx.link().callback(|_| Msg::ToggleSidebar)}>{if self.sidebar { "<" } else { ">" }}</button>
+                    </div>
+                    <div class="chat-window">
+                        <div class="chat-input-container">
+                            <input class="chat-input"
+                            oninput={ctx.link().callback(|e: InputEvent| {
+                                let input: HtmlInputElement = e.target_unchecked_into();
+                                Msg::UpdateMessage(input.value())
+                            })}
+                            onkeypress={
+                                let message_input = self.message_input.clone();
+                                ctx.link().batch_callback(move |e: KeyboardEvent| {
+                                if e.key() == "Enter" {
+                                    e.prevent_default();
+                                    if !message_input.is_empty() {
+                                        return Some(Msg::SubmitMessage)
+                                    }
                                 }
-                            </div>
+                                None
+                            })}
+                            value={self.message_input.clone()}
+                            />
+                        </div>
+                        <div class="chat-messages">
+                            {
+                                if let Some(chat) = &self.current_chat {
+                                    chat.borrow().messages.iter().map(|message| {
+                                        let author = match message.author {
+                                            Author::User => "user",
+                                            Author::Assistant => "assistant"
+                                        };
+                                        html! {
+                                            <div class={classes!("message-row", author)}>
+                                                <div class="message">{&message.content}</div>
+                                            </div>
+                                        }
+                                    }).collect()
+                                } else {
+                                    Vec::new()
+                                }
+                            }
                         </div>
                     </div>
                 </div>
