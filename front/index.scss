@@ -28,7 +28,7 @@ html, body {
   background-color: $primary;
 }
 
-.login-container {
+.login {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -52,15 +52,6 @@ html, body {
       display: flex;
       flex-flow: column;
       align-items: center;
-      
-      label {
-        color: $text;
-      }
-  
-      input {
-        background-color: $input;
-        color: black;
-      }
     
       * {
         margin: 0.3em;
@@ -88,8 +79,104 @@ html, body {
     }
   }
 }
+
+.session {
+  display: flex;
+  flex-flow: column;
+  
+  width: 100vw;
+  height: 100vh;
+  overflow: auto;
+
+  .navbar {
+    height: 4em;
+    border: 1px solid $trim;
+    display: flex;
+    flex-flow: row;
+    align-items: center;
+    background-color: $secondary;
+
+    * {
+      margin: 1em;
+    }
+  }
+
+  .content {
+    flex: 1;
+    display: flex;
+    flex-flow: row;
+
+    .sidebar {
+      display: flex;
+      flex-flow: column;
+
+      width: 14em;
+      border: 1px solid $tertiary;
+
+      .chat {
+        height: 3em;
+        align-items: center;
+
+        border: 1px solid $tertiary;
+
+        * {
+          margin: 1em;
+        }
+      }
+    }
+
+    .chat-window {
+      flex: 1;
+      display: flex;
+      flex-flow: column-reverse;
+
+      .chat-messages {
+        flex: 1;
+        display: flex;
+        flex-flow: column;
+        overflow-y: auto;
+        padding: 0.5em;
+        max-height: 100%;
+
+        .message-row {
+          margin: 0.8em;
+          display: flex;
+
+          &.user {
+            flex-flow: row-reverse;
+          }
+
+          &.assistant {
+            flex-flow: row;
+          }
+
+          .message {
+            max-width: 80%;
+          }
+        }
+      }
+
+      .chat-input-container {
+        display: flex;
+        height: 7em;
+
+        justify-content: center;
+        align-items: center;
+
+        .chat-input {
+          width: 80%;
+        }
+      }
+    }
+  }
+}
  
 button {
   background-color: $tertiary;
   border-radius: 0.1em;
+}
+
+input {
+  background-color: $input;
+  color: black;
 }

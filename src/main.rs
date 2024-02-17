@@ -11,9 +11,8 @@ use diesel::insert_into;
 use diesel::prelude::*;
 use diesel::r2d2::{self, ConnectionManager};
 use diesel::Insertable;
-use model::FullUser;
+use model::User;
 use shared::create_user::PasswordValidationError;
-use shared::model::User;
 
 use shared::{create_user, login, me};
 
@@ -29,10 +28,9 @@ struct AdminSignup(bool);
 mod model {
     use diesel::deserialize::Queryable;
     use serde::{Deserialize, Serialize};
-    use shared::model::User;
 
     #[derive(Queryable, Serialize, Deserialize, Clone, Debug)]
-    pub struct FullUser {
+    pub struct User {
         pub id: i32,
         pub username: String,
         pub email: String,
@@ -40,17 +38,17 @@ mod model {
         pub admin: bool,
     }
 
-    impl From<FullUser> for User {
+    impl From<User> for shared::model::User {
         fn from(
-            FullUser {
+            User {
                 id,
                 username,
                 email,
                 admin,
                 ..
-            }: FullUser,
+            }: User,
         ) -> Self {
-            User {
+            shared::model::User {
                 id,
                 username,
                 email,
@@ -68,7 +66,7 @@ fn encrypt_password(name: &str, password: &str) -> String {
     hash(format!("{}#{}", name, password), DEFAULT_COST).expect("Error hashing password")
 }
 
-fn check_password(user: &FullUser, password: &str) -> bool {
+fn check_password(user: &User, password: &str) -> bool {
     verify(
         format!("{}#{}", user.username, password),
         &user.password_hash,
@@ -85,7 +83,7 @@ impl UserFromIdentity for Identity {
         let user_id = self.id().ok()?.parse::<i32>().ok()?;
         users
             .find(user_id)
-            .first::<FullUser>(db)
+            .first::<User>(db)
             .optional()
             .ok()?
             .map(Into::into)
@@ -160,7 +158,7 @@ async fn create_user_inner(
     let user_query = users
         .filter(username.eq(&body.username))
         .or_filter(email.eq(&body.email))
-        .first::<FullUser>(db)
+        .first::<User>(db)
         .optional()
         .expect("Error querying database");
 
@@ -179,7 +177,7 @@ async fn create_user_inner(
     };
 
     // Insert new user into the database
-    let new_user: FullUser = insert_into(users)
+    let new_user: User = insert_into(users)
         .values(&new_user)
         .get_result(db)
         .expect("Error inserting new user");
@@ -210,7 +208,7 @@ async fn login_handler(
     let mut db = db.get().expect("Database not available");
     let user_query = users
         .filter(username.eq(&body.identifier).or(email.eq(&body.identifier)))
-        .first::<FullUser>(&mut db)
+        .first::<User>(&mut db)
         .optional()
         .expect("Error querying database");
 
@@ -238,7 +236,7 @@ async fn me_handler(identity: Option<Identity>, db: Data<Pool>) -> impl Responde
     let mut db = db.get().expect("Database not available");
     let response = match identity.user(&mut db) {
         None => me::Response::Anonymous,
-        Some(user) => me::Response::User(user),
+        Some(user) => me::Response::User(user.into()),
     };
     HttpResponse::Ok().json(response)
 }
@@ -289,6 +287,7 @@ async fn main() -> std::io::Result<()> {
                 redis.clone(),
                 Key::from(identity_secret.as_bytes()),
             ))
+            .service(admin_signup_handler)
             .service(create_user_handler)
             .service(login_handler)
             .service(logout_handler)

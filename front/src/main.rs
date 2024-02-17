@@ -1,7 +1,11 @@
 use std::time::Duration;
 
+extern crate wasm_bindgen_futures as futures;
+
+use futures::wasm_bindgen::JsValue;
 use gloo_console::log;
 use gloo_net::http::Request;
+use gloo_utils::format::JsValueSerdeExt;
 use shared::{me, model::User};
 use yew::prelude::*;
 
@@ -12,8 +16,16 @@ use gloo_timers::future::TimeoutFuture as Timeout;
 fn sleep(duration: Duration) -> Timeout {
     Timeout::new(duration.as_millis() as u32)
 }
+macro_rules! dbg_log {
+    ($msg:literal$(, $($obj:expr),*)?) => {
+        log!($msg, $(JsValue::from_serde(&$obj).unwrap()),*)
+    };
+}
 
 macro_rules! wait {
+    (1 second) => {
+        wait!(1 seconds)
+    };
     ($secs:literal seconds) => {
         sleep(Duration::from_secs($secs)).await
     };
@@ -62,14 +74,9 @@ macro_rules! json {
 
 mod login {
 
-    extern crate wasm_bindgen_futures as futures;
-
     use std::time::Duration;
 
-    use futures::wasm_bindgen::JsValue;
-    use gloo_console::log;
     use gloo_net::http::Request;
-    use gloo_utils::format::JsValueSerdeExt;
     use serde::Serialize;
     use web_sys::HtmlInputElement;
     use yew::prelude::*;
@@ -165,7 +172,6 @@ mod login {
                     self.message = None;
                 }
                 Msg::Login(user) => {
-                    log!("Logging in user", JsValue::from_serde(&user).unwrap());
                     ctx.props().on_login.emit(user);
                 }
             };
@@ -174,7 +180,7 @@ mod login {
 
         fn view(&self, ctx: &Context<Self>) -> Html {
             html! {
-                <div class={"login-container"}>
+                <div class={"login"}>
                     <div class={"login-box"}>
                         <div class={"login-form"}>
                             <label for="identifier">{"Username / Email"}</label>
@@ -264,9 +270,37 @@ mod session {
 
         fn view(&self, ctx: &yew::prelude::Context<Self>) -> yew::prelude::Html {
             html! {
-                <div>
-                    <div>{format!("Hello {}!", &ctx.props().user.username)}</div>
-                    <button onclick={ctx.link().callback(|_| Msg::Logout)}>{"Logout"}</button>
+                <div class="session">
+                    <div class="navbar">
+                        <p>{format!("Hello {}!", &ctx.props().user.username)}</p>
+                        <button onclick={ctx.link().callback(|_| Msg::Logout)}>{"Logout"}</button>
+                    </div>
+                    <div class="content">
+                        <div class="sidebar">
+                            {
+                                (1..=10).map(|i| html! {
+                                    <div class="chat"><p>{format!("chat {i}")}</p></div>
+                                }).collect::<Vec<_>>()
+                            }
+                        </div>
+                        <div class="chat-window">
+                            <div class="chat-input-container">
+                                <input class="chat-input" />
+                            </div>
+                            <div class="chat-messages">
+                                {
+                                    (1..=10).flat_map(|_| vec![
+                                        html! {
+                                            <div class="message-row user"><div class="message">{"Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat."}</div></div>
+                                        },
+                                        html!{
+                                            <div class="message-row assistant"><div class="message">{" Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum."}</div></div>
+                                        }
+                                    ]).collect::<Vec<_>>()
+                                }
+                            </div>
+                        </div>
+                    </div>
                 </div>
             }
         }
@@ -300,7 +334,6 @@ impl Component for App {
     }
 
     fn update(&mut self, _ctx: &Context<Self>, msg: Self::Message) -> bool {
-        log!("app message:", format!("{msg:#?}"));
         match msg {
             Msg::SetIdentity(identity_state) => {
                 self.identity_state = identity_state;
