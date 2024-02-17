@@ -272,7 +272,7 @@ async fn new_chat_handler(
 async fn main() -> std::io::Result<()> {
     println!("Starting");
 
-    // env vars
+    // read env vars
     let identity_secret = env::var("IDENTITY_SECRET").expect("IDENTITY_SECRET must be set");
     let port = env::var("PORT").expect("PORT must be set");
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
@@ -285,14 +285,14 @@ async fn main() -> std::io::Result<()> {
     println!("redis_url: {redis_url}");
     println!("admin_signup: {admin_signup}");
 
-    // setup db connection
+    // connect to db
     let manager = ConnectionManager::<PgConnection>::new(database_url);
     let pool: Pool = r2d2::Pool::builder()
         .build(manager)
         .expect("Failed to create pool.");
     println!("Connected to database");
 
-    // setup redis connection
+    // connect to redis
     let redis = RedisSessionStore::new(redis_url).await.unwrap();
     println!("Connected to redis");
 
