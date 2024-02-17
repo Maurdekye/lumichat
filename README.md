@@ -30,13 +30,13 @@ rustup target add wasm32-unknown-unknown
 # Deploy auxiliary docker services
 docker compose up -d db redis
 
-# Build the frontend
-cd front
-trunk 
-cd ..
-
 # Set environment variables
 export $(cat .env | xargs)
+
+# Build the frontend
+cd front
+trunk build
+cd ..
 
 # Build & run the backend
 cargo run
