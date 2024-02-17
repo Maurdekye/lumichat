@@ -30,14 +30,6 @@ fn validate_password(_password: &str) -> Result<(), PasswordValidationError> {
     Ok(()) // no validation for now
 }
 
-fn encrypt_password(password: &str) -> String {
-    hash(password, DEFAULT_COST).expect("Error hashing password")
-}
-
-fn check_password(user: &FullUser, password: &str) -> bool {
-    verify(password, &user.password_hash).expect("Error decrypting password")
-}
-
 trait FullUserFromIdentity {
     fn user(&self, db: &mut PoolConnection) -> Option<FullUser>;
 }
@@ -138,7 +130,7 @@ async fn create_user_inner(
     let new_user = NewFullUser {
         username: &body.username,
         email: &body.email,
-        password_hash: &encrypt_password(&body.password),
+        password_hash: &hash(&body.password, DEFAULT_COST).expect("Error hashing password"),
         admin: make_admin,
     };
 
@@ -185,7 +177,7 @@ async fn login_handler(
     };
 
     // check password
-    if !check_password(&user, &body.password) {
+    if !verify(&body.password, &user.password_hash).expect("Error decrypting password") {
         return HttpResponse::BadRequest().json(login::Response::Failure(
             login::FailureReason::InvalidPassword,
         ));
