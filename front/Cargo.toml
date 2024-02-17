@@ -15,3 +15,5 @@ wasm-bindgen-futures = "0.4.41"
 web-sys = "0.3.68"
 yew = { version = "0.21.0", features = ["csr"] }
 gloo-timers = { version = "0.3.0", features = ["futures"] }
+chrono = { version = "0.4.34", features = ["serde"] }
+diesel-derive-enum = { version = "2.1.0", features = ["postgres"] }

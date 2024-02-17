@@ -1,4 +1,5 @@
 use std::env;
+use std::time::Instant;
 
 use actix_files as fs;
 use actix_identity::{Identity, IdentityMiddleware};
@@ -7,66 +8,34 @@ use actix_web::cookie::Key;
 use actix_web::web::{self, Data};
 use actix_web::{get, post, App, HttpMessage, HttpRequest, HttpResponse, HttpServer, Responder};
 use bcrypt::{hash, verify, DEFAULT_COST};
+use chrono::{NaiveDateTime, Utc};
 use diesel::insert_into;
 use diesel::prelude::*;
 use diesel::r2d2::{self, ConnectionManager};
 use diesel::Insertable;
-use model::User;
 use shared::create_user::PasswordValidationError;
 
-use shared::{create_user, login, me};
+use shared::model::{AuthorType, Chat, FullUser, Message};
+use shared::{create_user, login, me, new_chat};
 
-use crate::schema::users::dsl::*;
-
-mod schema;
+use shared::schema::users::dsl::*;
+use shared::schema::chats::dsl::*;
+use shared::schema::messages::dsl::*;
 
 pub type Pool = r2d2::Pool<ConnectionManager<PgConnection>>;
 pub type PoolConnection = r2d2::PooledConnection<ConnectionManager<PgConnection>>;
 
 struct AdminSignup(bool);
 
-mod model {
-    use diesel::deserialize::Queryable;
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Queryable, Serialize, Deserialize, Clone, Debug)]
-    pub struct User {
-        pub id: i32,
-        pub username: String,
-        pub email: String,
-        pub password_hash: String,
-        pub admin: bool,
-    }
-
-    impl From<User> for shared::model::User {
-        fn from(
-            User {
-                id,
-                username,
-                email,
-                admin,
-                ..
-            }: User,
-        ) -> Self {
-            shared::model::User {
-                id,
-                username,
-                email,
-                admin,
-            }
-        }
-    }
-}
-
 fn validate_password(_password: &str) -> Result<(), PasswordValidationError> {
     Ok(()) // no validation for now
 }
 
-fn encrypt_password(name: &str, password: &str) -> String {
-    hash(format!("{}#{}", name, password), DEFAULT_COST).expect("Error hashing password")
+fn encrypt_password(user_name: &str, password: &str) -> String {
+    hash(format!("{}#{}", user_name, password), DEFAULT_COST).expect("Error hashing password")
 }
 
-fn check_password(user: &User, password: &str) -> bool {
+fn check_password(user: &FullUser, password: &str) -> bool {
     verify(
         format!("{}#{}", user.username, password),
         &user.password_hash,
@@ -74,31 +43,33 @@ fn check_password(user: &User, password: &str) -> bool {
     .expect("Error decrypting password")
 }
 
-trait UserFromIdentity {
-    fn user(&self, db: &mut PoolConnection) -> Option<User>;
+trait FullUserFromIdentity {
+    fn user(&self, db: &mut PoolConnection) -> Option<FullUser>;
 }
 
-impl UserFromIdentity for Identity {
-    fn user(&self, db: &mut PoolConnection) -> Option<User> {
+impl FullUserFromIdentity for Identity {
+    fn user(&self, db: &mut PoolConnection) -> Option<FullUser> {
         let user_id = self.id().ok()?.parse::<i32>().ok()?;
         users
             .find(user_id)
-            .first::<User>(db)
+            .first::<FullUser>(db)
             .optional()
             .ok()?
             .map(Into::into)
     }
 }
 
-impl UserFromIdentity for Option<Identity> {
-    fn user(&self, db: &mut PoolConnection) -> Option<User> {
+impl FullUserFromIdentity for Option<Identity> {
+    fn user(&self, db: &mut PoolConnection) -> Option<FullUser> {
         self.as_ref().and_then(|ident| ident.user(db))
     }
 }
 
+// FullUser Authentication
+
 #[derive(Insertable)]
-#[diesel(table_name = crate::schema::users)]
-pub struct NewUser<'a> {
+#[diesel(table_name = shared::schema::users)]
+pub struct NewFullUser<'a> {
     username: &'a str,
     email: &'a str,
     password_hash: &'a str,
@@ -158,7 +129,7 @@ async fn create_user_inner(
     let user_query = users
         .filter(username.eq(&body.username))
         .or_filter(email.eq(&body.email))
-        .first::<User>(db)
+        .first::<FullUser>(db)
         .optional()
         .expect("Error querying database");
 
@@ -169,7 +140,7 @@ async fn create_user_inner(
     }
 
     // Prepare the new user data
-    let new_user = NewUser {
+    let new_user = NewFullUser {
         username: &body.username,
         email: &body.email,
         password_hash: &encrypt_password(&body.username, &body.password),
@@ -177,7 +148,7 @@ async fn create_user_inner(
     };
 
     // Insert new user into the database
-    let new_user: User = insert_into(users)
+    let new_user: FullUser = insert_into(users)
         .values(&new_user)
         .get_result(db)
         .expect("Error inserting new user");
@@ -208,7 +179,7 @@ async fn login_handler(
     let mut db = db.get().expect("Database not available");
     let user_query = users
         .filter(username.eq(&body.identifier).or(email.eq(&body.identifier)))
-        .first::<User>(&mut db)
+        .first::<FullUser>(&mut db)
         .optional()
         .expect("Error querying database");
 
@@ -246,6 +217,69 @@ async fn logout_handler(user: Identity) -> impl Responder {
     println!("/logout");
     user.logout();
     HttpResponse::Ok()
+}
+
+// Chatting
+
+#[derive(Insertable)]
+#[diesel(table_name = shared::schema::chats)]
+struct NewChat<'a> {
+    name: &'a str,
+    owner: i32,
+    created: NaiveDateTime,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = shared::schema::messages)]
+struct NewMessage<'a> {
+    chat_id: i32,
+    author: AuthorType,
+    content: &'a str,
+    created: NaiveDateTime,
+}
+
+#[get("/new-chat")]
+async fn new_chat_handler(
+    user: Identity,
+    db: Data<Pool>,
+    body: web::Json<new_chat::Request>,
+) -> impl Responder {
+
+    // decode request
+    let body = body.into_inner();
+    println!("/new-chat: {body:#?}");
+
+    // put new chat into database
+    let user_id: i32 = user.id().unwrap().parse().unwrap();
+    let mut db = db.get().expect("Database not available");
+    let now = Utc::now().naive_utc();
+    let new_chat = NewChat {
+        name: "New Chat",
+        owner: user_id,
+        created: now.clone()
+    };
+    let new_chat: Chat = insert_into(chats)
+        .values(&new_chat)
+        .get_result(&mut db)
+        .expect("Error insterting new chat");
+
+    // put new message into database
+    let new_message = NewMessage {
+        chat_id: new_chat.id,
+        author: AuthorType::User,
+        content: &body.initial_message,
+        created: now,
+    };
+    let new_message: Message = insert_into(messages)
+        .values(&new_message)
+        .get_result(&mut db)
+        .expect("Error inserting message into new chat");
+
+    // send chat and message back
+    HttpResponse::Ok().json(new_chat::Response {
+        chat: new_chat,
+        messages: vec![new_message],
+    })
 }
 
 #[actix_web::main]

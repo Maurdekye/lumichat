@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS Messages;
+DROP TYPE IF EXISTS author_type;

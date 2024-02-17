@@ -2,7 +2,7 @@
 set -e
 
 docker compose up -d db
-
+cd shared
 docker run --rm \
     -v "$(pwd)":/app \
     --network lumichat_default \
