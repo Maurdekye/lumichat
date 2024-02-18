@@ -149,3 +149,11 @@ pub mod new_chat {
         pub messages: Vec<Message>,
     }
 }
+
+pub mod websocket {
+    
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Serialize, Deserialize, Clone, Debug)]
+    pub enum Message {}
+}

@@ -1,11 +1,16 @@
+use std::collections::HashMap;
+use std::default::Default;
 use std::env;
+use std::sync::RwLock;
 
+use actix::{Actor, Addr, StreamHandler};
 use actix_files as fs;
 use actix_identity::{Identity, IdentityMiddleware};
 use actix_session::{storage::RedisSessionStore, SessionMiddleware};
 use actix_web::cookie::Key;
 use actix_web::web::{self, Data};
 use actix_web::{get, post, App, HttpMessage, HttpRequest, HttpResponse, HttpServer, Responder};
+use actix_web_actors::ws::{self, WsResponseBuilder};
 use bcrypt::{hash, verify, DEFAULT_COST};
 use chrono::{NaiveDateTime, Utc};
 use diesel::insert_into;
@@ -15,7 +20,7 @@ use diesel::Insertable;
 use shared::create_user::PasswordValidationError;
 
 use shared::model::{AuthorType, Chat, FullUser, Message};
-use shared::{create_user, login, me, new_chat};
+use shared::{create_user, login, me, new_chat, websocket};
 
 use shared::schema::chats::dsl::*;
 use shared::schema::messages::dsl::*;
@@ -24,10 +29,62 @@ use shared::schema::users::dsl::*;
 pub type Pool = r2d2::Pool<ConnectionManager<PgConnection>>;
 pub type PoolConnection = r2d2::PooledConnection<ConnectionManager<PgConnection>>;
 
-struct AdminSignup(bool);
-
 fn validate_password(_password: &str) -> Result<(), PasswordValidationError> {
     Ok(()) // no validation for now
+}
+
+struct Websocket;
+
+impl Actor for Websocket {
+    type Context = ws::WebsocketContext<Self>;
+}
+
+impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for Websocket {
+    fn handle(&mut self, msg: Result<ws::Message, ws::ProtocolError>, ctx: &mut Self::Context) {
+        match msg {
+            Err(err) => eprintln!("ws error: {err}"),
+            Ok(msg) => match msg {
+                ws::Message::Ping(msg) => ctx.pong(&msg),
+                ws::Message::Pong(_) => {}
+                _ => {}
+            },
+        }
+    }
+}
+
+#[derive(actix::Message)]
+#[rtype(result = "()")]
+struct WebsocketMessage(websocket::Message);
+
+impl From<websocket::Message> for WebsocketMessage {
+    fn from(value: websocket::Message) -> Self {
+        Self(value)
+    }
+}
+
+impl actix::Handler<WebsocketMessage> for Websocket {
+    type Result = ();
+
+    fn handle(&mut self, msg: WebsocketMessage, ctx: &mut Self::Context) {
+        ctx.text(
+            serde_json::to_string(&msg.0).expect("Websocket messages should be serializeable"),
+        );
+    }
+}
+
+struct State {
+    admin_signup: bool,
+    websock_connections: RwLock<HashMap<i32, Vec<Addr<Websocket>>>>,
+}
+
+trait UserIdFromIdentity {
+    fn user_id(&self) -> Option<i32>;
+}
+
+impl UserIdFromIdentity for Identity {
+    fn user_id(&self) -> Option<i32> {
+        self.id().ok()?.parse::<i32>().ok()
+    }
 }
 
 trait FullUserFromIdentity {
@@ -36,7 +93,7 @@ trait FullUserFromIdentity {
 
 impl FullUserFromIdentity for Identity {
     fn user(&self, db: &mut PoolConnection) -> Option<FullUser> {
-        let user_id = self.id().ok()?.parse::<i32>().ok()?;
+        let user_id = self.user_id()?;
         users
             .find(user_id)
             .first::<FullUser>(db)
@@ -52,7 +109,30 @@ impl FullUserFromIdentity for Option<Identity> {
     }
 }
 
-// FullUser Authentication
+// Websocket management
+
+#[get("/ws")]
+async fn ws_handler(
+    request: HttpRequest,
+    stream: web::Payload,
+    identity: Identity,
+    state: Data<State>,
+) -> impl Responder {
+    let user_id = identity.user_id().expect("Failed to get user id");
+    let (websocket_address, response) = WsResponseBuilder::new(Websocket, &request, stream)
+        .start_with_addr()
+        .expect("Unable to create websocket connection");
+    state
+        .websock_connections
+        .write()
+        .unwrap()
+        .entry(user_id)
+        .or_insert_with(Vec::new)
+        .push(websocket_address);
+    response
+}
+
+// User Authentication
 
 #[derive(Insertable)]
 #[diesel(table_name = shared::schema::users)]
@@ -67,10 +147,10 @@ pub struct NewFullUser<'a> {
 async fn admin_signup_handler(
     body: web::Json<create_user::Request>,
     db: Data<Pool>,
-    admin_signup_enabled: Data<AdminSignup>,
+    state: Data<State>,
 ) -> impl Responder {
     // check if admin signup is enabled
-    if !admin_signup_enabled.get_ref().0 {
+    if !state.admin_signup {
         return HttpResponse::Unauthorized().finish();
     }
 
@@ -301,12 +381,16 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         App::new()
             .app_data(Data::new(pool.clone()))
-            .app_data(Data::new(AdminSignup(admin_signup)))
+            .app_data(Data::new(State {
+                admin_signup,
+                websock_connections: Default::default(),
+            }))
             .wrap(IdentityMiddleware::default())
             .wrap(SessionMiddleware::new(
                 redis.clone(),
                 Key::from(identity_secret.as_bytes()),
             ))
+            .service(ws_handler)
             .service(admin_signup_handler)
             .service(create_user_handler)
             .service(login_handler)

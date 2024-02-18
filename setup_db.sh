@@ -9,3 +9,9 @@ docker run --rm \
     willsquire/diesel-cli \
     --database-url=postgres://postgres:root@db:5432/postgres \
     setup
+docker run --rm \
+    -v "$(pwd)":/app \
+    --network lumichat_default \
+    willsquire/diesel-cli \
+    --database-url=postgres://postgres:root@db:5432/postgres \
+    migration run

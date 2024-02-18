@@ -1,11 +1,5 @@
 use std::time::Duration;
 
-extern crate wasm_bindgen_futures as futures;
-
-use futures::wasm_bindgen::JsValue;
-use gloo_console::log;
-use gloo_net::http::Request;
-use gloo_utils::format::JsValueSerdeExt;
 use shared::{me, model::User};
 use yew::prelude::*;
 
@@ -13,14 +7,31 @@ use crate::{login::Login, session::Session};
 
 use gloo_timers::future::TimeoutFuture as Timeout;
 
+#[allow(unused_macros)]
+macro_rules! dbg_log {
+    ($($msg:literal, $obj:expr),*) => {
+        gloo_console::log!($($msg, <wasm_bindgen_futures::wasm_bindgen::JsValue as gloo_utils::format::JsValueSerdeExt>::from_serde(&$obj).unwrap()),*)
+    };
+}
+
 fn sleep(duration: Duration) -> Timeout {
     Timeout::new(duration.as_millis() as u32)
 }
 
-macro_rules! dbg_log {
-    ($msg:literal$(, $($obj:expr),*)?) => {
-        log!($msg, $(JsValue::from_serde(&$obj).unwrap()),*)
-    };
+trait DurFrom {
+    fn dur_from(self) -> Duration;
+}
+
+impl DurFrom for u64 {
+    fn dur_from(self) -> Duration {
+        Duration::from_secs(self)
+    }
+}
+
+impl DurFrom for f64 {
+    fn dur_from(self) -> Duration {
+        Duration::from_secs_f64(self)
+    }
 }
 
 macro_rules! wait {
@@ -28,7 +39,7 @@ macro_rules! wait {
         wait!(1 seconds)
     };
     ($secs:literal seconds) => {
-        crate::sleep(std::time::Duration::from_secs($secs)).await
+        crate::sleep(crate::DurFrom::dur_from($secs)).await
     };
     ($millis:literal millis) => {
         crate::sleep(std::time::Duration::from_millis($millis)).await
@@ -75,16 +86,11 @@ macro_rules! json {
 
 mod login {
 
-    use std::time::Duration;
-
-    use gloo_net::http::Request;
     use serde::Serialize;
     use web_sys::HtmlInputElement;
     use yew::prelude::*;
 
     use shared::{login, model::User};
-
-    use super::sleep;
 
     #[derive(Serialize)]
     pub enum Msg {
@@ -233,8 +239,9 @@ mod login {
 mod session {
     use std::{cell::RefCell, rc::Rc};
 
-    use gloo_net::http::Request;
-    use shared::model::User;
+    use futures::StreamExt;
+    use gloo_net::websocket::{futures::WebSocket, Message};
+    use shared::{model::User, websocket};
     use web_sys::HtmlInputElement;
     use yew::prelude::*;
 
@@ -258,6 +265,7 @@ mod session {
         chats: Vec<Rc<RefCell<Chat>>>,
         current_chat: Option<Rc<RefCell<Chat>>>,
         message_input: String,
+        websocket_connected: bool,
     }
 
     pub enum Msg {
@@ -271,6 +279,9 @@ mod session {
             content: String,
             chat: Rc<RefCell<Chat>>,
         },
+        WebsocketConnect,
+        WebsocketData(websocket::Message),
+        WebsocketDisconnect,
     }
 
     #[derive(Clone, PartialEq, Properties)]
@@ -289,6 +300,7 @@ mod session {
                 chats: Vec::new(),
                 current_chat: None,
                 message_input: String::new(),
+                websocket_connected: false,
             }
         }
 
@@ -346,11 +358,53 @@ mod session {
                         content,
                     });
                 }
+                Msg::WebsocketConnect => {
+                    self.websocket_connected = true;
+                }
+                Msg::WebsocketData(data) => {
+                    println!("websocket data: {data:?}");
+                }
+                Msg::WebsocketDisconnect => {
+                    self.websocket_connected = false;
+                }
             };
             true
         }
 
         fn view(&self, ctx: &yew::prelude::Context<Self>) -> yew::prelude::Html {
+            if !self.websocket_connected {
+                let data_callback = ctx.link().callback(Msg::WebsocketData);
+                let close_callback = ctx.link().callback(|_| Msg::WebsocketDisconnect);
+                ctx.link().send_future(async move {
+                    let Ok(websocket) = WebSocket::open("/ws") else {
+                        return Msg::WebsocketDisconnect;
+                    };
+                    let (_, mut read) = websocket.split();
+
+                    wasm_bindgen_futures::spawn_local(async move {
+                        while let Some(msg) = read.next().await {
+                            if let Err(err) = (|| -> Result<_, _> {
+                                let Message::Text(raw_message) =
+                                    msg.map_err(|e| format!("Websocket error: {e}"))?
+                                else {
+                                    return Err("Unexpected websocket binary data".to_string());
+                                };
+                                let message: websocket::Message =
+                                    serde_json::from_str(&*raw_message)
+                                        .map_err(|e| format!("Websocket decode error: {e}"))?;
+                                data_callback.emit(message);
+                                Ok(())
+                            })() {
+                                eprintln!("{err}");
+                            }
+                        }
+                        close_callback.emit(());
+                    });
+
+                    Msg::WebsocketConnect
+                })
+            }
+
             html! {
                 <div class="session">
                     <div class={if self.sidebar { "sidebar" } else { "sidebar collapsed" }}>
