@@ -1,11 +1,16 @@
 use std::time::Duration;
 
+use gloo_utils::window;
 use shared::{me, model::User};
 use yew::prelude::*;
 
 use crate::{login::Login, session::Session};
 
 use gloo_timers::future::TimeoutFuture as Timeout;
+
+fn host() -> Option<String> {
+    window().location().host().ok()
+}
 
 #[allow(unused_macros)]
 macro_rules! dbg_log {
@@ -240,10 +245,16 @@ mod session {
     use std::{cell::RefCell, rc::Rc};
 
     use futures::StreamExt;
+    use futures::stream::SplitSink;
+    use gloo_console::{error, log};
     use gloo_net::websocket::{futures::WebSocket, Message};
     use shared::{model::User, websocket};
     use web_sys::HtmlInputElement;
     use yew::prelude::*;
+
+    use crate::host;
+
+    type WebsocketWriter = SplitSink<WebSocket, gloo_net::websocket::Message>;
 
     pub enum Author {
         User,
@@ -265,7 +276,7 @@ mod session {
         chats: Vec<Rc<RefCell<Chat>>>,
         current_chat: Option<Rc<RefCell<Chat>>>,
         message_input: String,
-        websocket_connected: bool,
+        websocket: Option<WebsocketWriter>,
     }
 
     pub enum Msg {
@@ -279,7 +290,7 @@ mod session {
             content: String,
             chat: Rc<RefCell<Chat>>,
         },
-        WebsocketConnect,
+        WebsocketConnect(WebsocketWriter),
         WebsocketData(websocket::Message),
         WebsocketDisconnect,
     }
@@ -294,13 +305,13 @@ mod session {
         type Message = Msg;
         type Properties = Props;
 
-        fn create(_ctx: &yew::prelude::Context<Self>) -> Self {
+        fn create(_ctx: &Context<Self>) -> Self {
             Self {
                 sidebar: true,
                 chats: Vec::new(),
                 current_chat: None,
                 message_input: String::new(),
-                websocket_connected: false,
+                websocket: None,
             }
         }
 
@@ -358,28 +369,38 @@ mod session {
                         content,
                     });
                 }
-                Msg::WebsocketConnect => {
-                    self.websocket_connected = true;
+                Msg::WebsocketConnect(writer) => {
+                    log!("websocket connected");
+                    self.websocket = Some(writer);
                 }
                 Msg::WebsocketData(data) => {
-                    println!("websocket data: {data:?}");
+                    log!("websocket data:", format!("{data:#?}"));
                 }
                 Msg::WebsocketDisconnect => {
-                    self.websocket_connected = false;
+                    log!("websocket connection closed");
+                    self.websocket = None;
                 }
             };
             true
         }
 
-        fn view(&self, ctx: &yew::prelude::Context<Self>) -> yew::prelude::Html {
-            if !self.websocket_connected {
+        fn view(&self, ctx: &Context<Self>) -> Html {
+            if self.websocket.is_none() {
                 let data_callback = ctx.link().callback(Msg::WebsocketData);
                 let close_callback = ctx.link().callback(|_| Msg::WebsocketDisconnect);
                 ctx.link().send_future(async move {
-                    let Ok(websocket) = WebSocket::open("/ws") else {
-                        return Msg::WebsocketDisconnect;
+                    let websocket_address =
+                        format!("ws://{}/ws", host().expect("Host address not available"));
+                    log!("connecting to websocket at", &websocket_address);
+                    let websocket = match WebSocket::open(&*websocket_address) {
+                        Err(err) => {
+                            error!("websocket connection failed:", err.to_string());
+                            wait!(1 second);
+                            return Msg::WebsocketDisconnect;
+                        }
+                        Ok(websocket) => websocket,
                     };
-                    let (_, mut read) = websocket.split();
+                    let (write, mut read) = websocket.split();
 
                     wasm_bindgen_futures::spawn_local(async move {
                         while let Some(msg) = read.next().await {
@@ -395,13 +416,13 @@ mod session {
                                 data_callback.emit(message);
                                 Ok(())
                             })() {
-                                eprintln!("{err}");
+                                error!(err);
                             }
                         }
                         close_callback.emit(());
                     });
 
-                    Msg::WebsocketConnect
+                    Msg::WebsocketConnect(write)
                 })
             }
 

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::default::Default;
 use std::env;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use actix::{Actor, Addr, StreamHandler};
 use actix_files as fs;
@@ -26,8 +26,9 @@ use shared::schema::chats::dsl::*;
 use shared::schema::messages::dsl::*;
 use shared::schema::users::dsl::*;
 
-pub type Pool = r2d2::Pool<ConnectionManager<PgConnection>>;
-pub type PoolConnection = r2d2::PooledConnection<ConnectionManager<PgConnection>>;
+type Pool = r2d2::Pool<ConnectionManager<PgConnection>>;
+type PoolConnection = r2d2::PooledConnection<ConnectionManager<PgConnection>>;
+type AppState = Arc<RwLock<State>>;
 
 fn validate_password(_password: &str) -> Result<(), PasswordValidationError> {
     Ok(()) // no validation for now
@@ -74,7 +75,27 @@ impl actix::Handler<WebsocketMessage> for Websocket {
 
 struct State {
     admin_signup: bool,
-    websock_connections: RwLock<HashMap<i32, Vec<Addr<Websocket>>>>,
+    websock_connections: HashMap<i32, Vec<Addr<Websocket>>>,
+}
+
+impl State {
+    pub fn send_message(&mut self, user_id: i32, message: websocket::Message) {
+        if let Some(connections) = self.websock_connections.get_mut(&user_id) {
+            connections.retain(Addr::connected);
+            for connection in connections {
+                connection.do_send(message.clone().into());
+            }
+        }
+    }
+
+    pub fn broadcast_message(&mut self, message: websocket::Message) {
+        for (_user_id, connections) in self.websock_connections.iter_mut() {
+            connections.retain(Addr::connected);
+            for connection in connections {
+                connection.do_send(message.clone().into())
+            }
+        }
+    }
 }
 
 trait UserIdFromIdentity {
@@ -116,16 +137,16 @@ async fn ws_handler(
     request: HttpRequest,
     stream: web::Payload,
     identity: Identity,
-    state: Data<State>,
+    state: Data<AppState>,
 ) -> impl Responder {
+    println!("/ws");
     let user_id = identity.user_id().expect("Failed to get user id");
+    let mut state = state.write().unwrap();
     let (websocket_address, response) = WsResponseBuilder::new(Websocket, &request, stream)
         .start_with_addr()
         .expect("Unable to create websocket connection");
     state
         .websock_connections
-        .write()
-        .unwrap()
         .entry(user_id)
         .or_insert_with(Vec::new)
         .push(websocket_address);
@@ -376,15 +397,18 @@ async fn main() -> std::io::Result<()> {
     let redis = RedisSessionStore::new(redis_url).await.unwrap();
     println!("Connected to redis");
 
+    // initialize app state
+    let app_state = Arc::new(RwLock::new(State {
+        admin_signup,
+        websock_connections: Default::default(),
+    }));
+
     // serve app
     println!("Running on {}", host_addr);
     HttpServer::new(move || {
         App::new()
             .app_data(Data::new(pool.clone()))
-            .app_data(Data::new(State {
-                admin_signup,
-                websock_connections: Default::default(),
-            }))
+            .app_data(Data::new(app_state.clone()))
             .wrap(IdentityMiddleware::default())
             .wrap(SessionMiddleware::new(
                 redis.clone(),
@@ -398,6 +422,7 @@ async fn main() -> std::io::Result<()> {
             .service(me_handler)
             .service(fs::Files::new("/", "./front/dist").index_file("index.html"))
     })
+    .workers(std::thread::available_parallelism().map(Into::into).unwrap_or(1))
     .bind(host_addr)?
     .run()
     .await
