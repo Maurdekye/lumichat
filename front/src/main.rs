@@ -385,6 +385,8 @@ mod session {
         }
 
         fn view(&self, ctx: &Context<Self>) -> Html {
+
+            // attempt to establish websocket connection
             if self.websocket.is_none() {
                 let data_callback = ctx.link().callback(Msg::WebsocketData);
                 let close_callback = ctx.link().callback(|_| Msg::WebsocketDisconnect);

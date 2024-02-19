@@ -82,8 +82,11 @@ impl State {
     pub fn send_message(&mut self, user_id: i32, message: websocket::Message) {
         if let Some(connections) = self.websock_connections.get_mut(&user_id) {
             connections.retain(Addr::connected);
-            for connection in connections {
+            for connection in connections.iter_mut() {
                 connection.do_send(message.clone().into());
+            }
+            if connections.is_empty() {
+                self.websock_connections.remove(&user_id);
             }
         }
     }
@@ -95,6 +98,7 @@ impl State {
                 connection.do_send(message.clone().into())
             }
         }
+        self.websock_connections.retain(|_, c| !c.is_empty());
     }
 }
 
