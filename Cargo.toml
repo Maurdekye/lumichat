@@ -22,3 +22,4 @@ diesel-derive-enum = { version = "2.1.0", features = ["postgres"] }
 actix-web-actors = "4.3.0"
 actix = "0.13.3"
 serde_json = "1.0.113"
+tokio = "1.36.0"

@@ -2,13 +2,14 @@ pub mod schema;
 
 pub mod model {
     use chrono::NaiveDateTime;
-    use diesel::{deserialize::Queryable, sql_types::SqlType};
+    use diesel::{deserialize::Queryable, sql_types::SqlType, Identifiable};
     use diesel_derive_enum::DbEnum;
     use serde::{Deserialize, Serialize};
 
     pub type UserId = i32;
 
-    #[derive(Queryable, Serialize, Deserialize, Clone, Debug)]
+    #[derive(Queryable, Identifiable, Serialize, Deserialize, Clone, Debug)]
+    #[diesel(table_name = crate::schema::users)]
     pub struct FullUser {
         pub id: UserId,
         pub username: String,
@@ -46,7 +47,8 @@ pub mod model {
 
     pub type ChatId = i32;
 
-    #[derive(Queryable, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    #[derive(Queryable, Identifiable, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    #[diesel(table_name = crate::schema::chats)]
     pub struct Chat {
         pub id: ChatId,
         pub name: String,
@@ -64,7 +66,8 @@ pub mod model {
 
     pub type MessageId = i32;
 
-    #[derive(Queryable, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    #[derive(Queryable, Identifiable, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    #[diesel(table_name = crate::schema::messages)]
     pub struct Message {
         pub id: MessageId,
         pub chat: ChatId,
@@ -251,7 +254,7 @@ pub mod websocket {
 
     use serde::{Deserialize, Serialize};
 
-    use crate::model::ChatId;
+    use crate::model::{ChatId, MessageId};
 
     pub mod chat {
         use serde::{Deserialize, Serialize};
@@ -267,6 +270,7 @@ pub mod websocket {
     pub enum Message {
         Message {
             chat: ChatId,
+            message: MessageId,
             content: chat::Message,
         },
     }

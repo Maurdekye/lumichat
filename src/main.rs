@@ -14,10 +14,12 @@ use actix_web::{get, post, App, HttpMessage, HttpRequest, HttpResponse, HttpServ
 use actix_web_actors::ws::{self, WsResponseBuilder};
 use bcrypt::{hash, verify, DEFAULT_COST};
 use chrono::{NaiveDateTime, Utc};
-use diesel::insert_into;
 use diesel::prelude::*;
 use diesel::r2d2::{self, ConnectionManager};
 use diesel::Insertable;
+use diesel::{insert_into, update};
+
+use tokio::time::{self, Duration};
 
 use serde::Serialize;
 use shared::{api::*, model::*, websocket};
@@ -118,6 +120,7 @@ impl StateInner {
         }
     }
 
+    #[allow(unused)]
     pub fn broadcast_message(&mut self, message: websocket::Message) {
         for (_user_id, connections) in self.websock_connections.iter_mut() {
             connections.retain(Addr::connected);
@@ -366,10 +369,11 @@ struct NewMessage<'a> {
 }
 
 async fn submit_chat_message(
-    db: &mut DatabaseConnection,
+    mut db: DatabaseConnection,
     user: UserId,
     chat: ChatId,
     content: &str,
+    state: Data<State>,
 ) -> (Message, Message) {
     // put new message into database
     let now = Utc::now().naive_utc();
@@ -381,7 +385,7 @@ async fn submit_chat_message(
     };
     let user_message: Message = insert_into(messages_dsl::messages)
         .values(&new_message)
-        .get_result(db)
+        .get_result(&mut db)
         .expect("Error inserting message into new chat");
 
     // put empty assistant response into database
@@ -393,11 +397,56 @@ async fn submit_chat_message(
     };
     let assistant_message: Message = insert_into(messages_dsl::messages)
         .values(&assistant_message)
-        .get_result(db)
+        .get_result(&mut db)
         .expect("Error inserting assistant message into new chat");
 
-    // TODO: code here to spawn a new thread to query the llm api and start sending message packets back
-    let _user = user; // spawn a new task here
+    // mock llm response
+    {
+        let assistant_message = assistant_message.clone();
+        actix::spawn(async move {
+            time::interval(Duration::from_secs(2)).tick().await;
+            let mut interval = time::interval(Duration::from_millis(200));
+            let message = assistant_message.id;
+            let mock_text = "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.";
+            
+            // send a bunch of tokens in chunks
+            for chunk in mock_text
+                .chars()
+                .collect::<Vec<_>>()
+                .chunks(4)
+                .map(|c| c.iter().collect::<String>())
+            {
+                state.write().unwrap().send_message(
+                    user,
+                    websocket::Message::Message {
+                        chat,
+                        message,
+                        content: websocket::chat::Message::Token(chunk),
+                    },
+                );
+                interval.tick().await;
+            }
+
+            // send completion message
+            state.write().unwrap().send_message(
+                user,
+                websocket::Message::Message {
+                    chat,
+                    message,
+                    content: websocket::chat::Message::Finish,
+                },
+            );
+
+            // push completed message to database
+            update(&assistant_message)
+                .set((
+                    messages_dsl::content.eq(mock_text),
+                    messages_dsl::author.eq(AuthorType::AssistantFinished),
+                ))
+                .execute(&mut db)
+                .expect("Error updating database");
+        });
+    }
 
     (user_message, assistant_message)
 }
@@ -406,6 +455,7 @@ async fn submit_chat_message(
 async fn new_chat_handler(
     identity: Identity,
     db: Data<Database>,
+    state: Data<State>,
     body: Json<new_chat::Request>,
 ) -> Response<new_chat::Response> {
     // decode request
@@ -428,7 +478,7 @@ async fn new_chat_handler(
 
     // place new chat message in database
     let (user_message, assistant_response) =
-        submit_chat_message(&mut db, user_id, chat.id, &body.initial_message).await;
+        submit_chat_message(db, user_id, chat.id, &body.initial_message, state).await;
 
     // send chat id and assistant message id back
     Okay(new_chat::Response {
@@ -486,6 +536,7 @@ get_chat_error_into!(chat_message::FailureReason);
 async fn chat_message_handler(
     identity: Identity,
     db: Data<Database>,
+    state: Data<State>,
     body: Json<chat_message::Request>,
 ) -> Response<chat_message::Response> {
     // decode request
@@ -501,7 +552,7 @@ async fn chat_message_handler(
 
     // place new chat message in database
     let (user_message, assistant_response) =
-        submit_chat_message(&mut db, chat.owner, body.chat, &body.message).await;
+        submit_chat_message(db, chat.owner, body.chat, &body.message, state).await;
 
     // send newly created messages back
     Okay(chat_message::Response::Success {
