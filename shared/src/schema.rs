@@ -22,7 +22,7 @@ diesel::table! {
 
     messages (id) {
         id -> Int4,
-        chat_id -> Int4,
+        chat -> Int4,
         author -> AuthorType,
         content -> Text,
         created -> Timestamp,
@@ -40,7 +40,7 @@ diesel::table! {
 }
 
 diesel::joinable!(chats -> users (owner));
-diesel::joinable!(messages -> chats (chat_id));
+diesel::joinable!(messages -> chats (chat));
 
 diesel::allow_tables_to_appear_in_same_query!(
     chats,

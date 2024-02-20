@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use gloo_utils::window;
-use shared::{me, model::User};
+use shared::{api::me, model::User};
 use yew::prelude::*;
 
 use crate::{login::Login, session::Session};
@@ -95,7 +95,7 @@ mod login {
     use web_sys::HtmlInputElement;
     use yew::prelude::*;
 
-    use shared::{login, model::User};
+    use shared::{api::login, model::User};
 
     #[derive(Serialize)]
     pub enum Msg {

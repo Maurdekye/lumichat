@@ -6,9 +6,11 @@ pub mod model {
     use diesel_derive_enum::DbEnum;
     use serde::{Deserialize, Serialize};
 
+    pub type UserId = i32;
+
     #[derive(Queryable, Serialize, Deserialize, Clone, Debug)]
     pub struct FullUser {
-        pub id: i32,
+        pub id: UserId,
         pub username: String,
         pub email: String,
         pub password_hash: String,
@@ -36,116 +38,208 @@ pub mod model {
 
     #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
     pub struct User {
-        pub id: i32,
+        pub id: UserId,
         pub username: String,
         pub email: String,
         pub admin: bool,
     }
 
+    pub type ChatId = i32;
+
     #[derive(Queryable, Serialize, Deserialize, Clone, Debug, PartialEq)]
     pub struct Chat {
-        pub id: i32,
+        pub id: ChatId,
         pub name: String,
-        pub owner: i32,
+        pub owner: UserId,
         pub created: NaiveDateTime,
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, SqlType, DbEnum)]
     #[ExistingTypePath = "crate::schema::sql_types::AuthorType"]
     pub enum AuthorType {
-        Assistant,
         User,
+        AssistantResponding,
+        AssistantFinished,
     }
+
+    pub type MessageId = i32;
 
     #[derive(Queryable, Serialize, Deserialize, Clone, Debug, PartialEq)]
     pub struct Message {
-        pub id: i32,
-        pub chat_id: i32,
+        pub id: MessageId,
+        pub chat: ChatId,
         pub author: AuthorType,
         pub content: String,
         pub created: NaiveDateTime,
     }
 }
 
-pub mod login {
-    use serde::{Deserialize, Serialize};
+pub mod api {
+    pub mod login {
+        use serde::{Deserialize, Serialize};
 
-    use crate::model::User;
+        use crate::model::User;
 
-    #[derive(Serialize, Deserialize, Clone, Debug)]
-    pub struct Request {
-        pub identifier: String,
-        pub password: String,
+        #[derive(Serialize, Deserialize, Clone, Debug)]
+        pub struct Request {
+            pub identifier: String,
+            pub password: String,
+        }
+
+        #[derive(Serialize, Deserialize, Clone, Debug)]
+        pub enum FailureReason {
+            AlreadyLoggedIn,
+            UserDoesNotExist,
+            InvalidPassword,
+        }
+
+        #[derive(Serialize, Deserialize, Clone, Debug)]
+        pub enum Response {
+            Success(User),
+            Failure(FailureReason),
+        }
     }
 
-    #[derive(Serialize, Deserialize, Clone, Debug)]
-    pub enum FailureReason {
-        AlreadyLoggedIn,
-        UserDoesNotExist,
-        InvalidPassword,
+    pub mod me {
+        use serde::{Deserialize, Serialize};
+
+        use crate::model::User;
+
+        #[derive(Serialize, Deserialize, Clone, Debug)]
+        pub enum Response {
+            Anonymous,
+            User(User),
+        }
     }
 
-    #[derive(Serialize, Deserialize, Clone, Debug)]
-    pub enum Response {
-        Success(User),
-        Failure(FailureReason),
-    }
-}
+    pub mod create_user {
+        use serde::{Deserialize, Serialize};
 
-pub mod me {
-    use serde::{Deserialize, Serialize};
+        use crate::model::User;
 
-    use crate::model::User;
+        #[derive(Serialize, Deserialize, Clone, Debug)]
+        pub struct Request {
+            pub username: String,
+            pub email: String,
+            pub password: String,
+        }
 
-    #[derive(Serialize, Deserialize, Clone, Debug)]
-    pub enum Response {
-        Anonymous,
-        User(User),
-    }
-}
+        #[derive(Serialize, Deserialize, Clone, Debug)]
+        pub enum PasswordValidationError {}
 
-pub mod create_user {
-    use serde::{Deserialize, Serialize};
+        #[derive(Serialize, Deserialize, Clone, Debug)]
+        pub enum FailureReason {
+            InvalidPassword(PasswordValidationError),
+            UserExists,
+        }
 
-    use crate::model::User;
-
-    #[derive(Serialize, Deserialize, Clone, Debug)]
-    pub struct Request {
-        pub username: String,
-        pub email: String,
-        pub password: String,
+        #[derive(Serialize, Deserialize, Clone, Debug)]
+        pub enum Response {
+            Success(User),
+            Failure(FailureReason),
+        }
     }
 
-    #[derive(Serialize, Deserialize, Clone, Debug)]
-    pub enum PasswordValidationError {}
+    pub mod new_chat {
+        use serde::{Deserialize, Serialize};
 
-    #[derive(Serialize, Deserialize, Clone, Debug)]
-    pub enum FailureReason {
-        InvalidPassword(PasswordValidationError),
-        UserExists,
+        use crate::model::{ChatId, MessageId};
+
+        #[derive(Serialize, Deserialize, Clone, Debug)]
+        pub struct Request {
+            pub initial_message: String,
+        }
+
+        #[derive(Serialize, Deserialize, Clone, Debug)]
+        pub struct Response {
+            pub chat: ChatId,
+            pub assistant_message: MessageId,
+        }
     }
 
-    #[derive(Serialize, Deserialize, Clone, Debug)]
-    pub enum Response {
-        Success(User),
-        Failure(FailureReason),
+    pub mod chat_message {
+        use serde::{Deserialize, Serialize};
+
+        use crate::model::{ChatId, MessageId};
+
+        #[derive(Serialize, Deserialize, Clone, Debug)]
+        pub struct Request {
+            pub chat: ChatId,
+            pub message: String,
+        }
+
+        #[derive(Serialize, Deserialize, Clone, Debug)]
+        pub enum FailureReason {
+            ChatDoesNotExist,
+            ChatNotOwnedByUser,
+        }
+
+        #[derive(Serialize, Deserialize, Clone, Debug)]
+        pub enum Response {
+            Success { assistant_message: MessageId },
+            Failure(FailureReason),
+        }
     }
-}
 
-pub mod new_chat {
-    use serde::{Deserialize, Serialize};
+    pub mod list_chats {
+        use serde::{Deserialize, Serialize};
 
-    use crate::model::{Chat, Message};
+        use crate::model::Chat;
 
-    #[derive(Serialize, Deserialize, Clone, Debug)]
-    pub struct Request {
-        pub initial_message: String,
+        #[derive(Serialize, Deserialize, Clone, Debug)]
+        pub struct Response {
+            pub chats: Vec<Chat>,
+        }
     }
 
-    #[derive(Serialize, Deserialize, Clone, Debug)]
-    pub struct Response {
-        pub chat: Chat,
-        pub messages: Vec<Message>,
+    pub mod check_chat {
+        use chrono::NaiveDateTime;
+        use serde::{Deserialize, Serialize};
+
+        use crate::model::ChatId;
+
+        #[derive(Serialize, Deserialize, Clone, Debug)]
+        pub struct Request {
+            pub chat: ChatId,
+        }
+
+        #[derive(Serialize, Deserialize, Clone, Debug)]
+        pub enum FailureReason {
+            ChatDoesNotExist,
+            ChatNotOwnedByUser,
+            ChatHasNoMessages,
+        }
+
+        #[derive(Serialize, Deserialize, Clone, Debug)]
+        pub enum Response {
+            Success {
+                most_recent_message_created: NaiveDateTime,
+            },
+            Failure(FailureReason),
+        }
+    }
+
+    pub mod list_messages {
+        use serde::{Deserialize, Serialize};
+
+        use crate::model::{ChatId, Message};
+
+        #[derive(Serialize, Deserialize, Clone, Debug)]
+        pub struct Request {
+            pub chat: ChatId,
+        }
+
+        #[derive(Serialize, Deserialize, Clone, Debug)]
+        pub enum FailureReason {
+            ChatDoesNotExist,
+            ChatNotOwnedByUser,
+        }
+
+        #[derive(Serialize, Deserialize, Clone, Debug)]
+        pub enum Response {
+            Success { messages: Vec<Message> },
+            Failure(FailureReason),
+        }
     }
 }
 
@@ -153,6 +247,23 @@ pub mod websocket {
 
     use serde::{Deserialize, Serialize};
 
+    use crate::model::ChatId;
+
+    pub mod chat {
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Serialize, Deserialize, Clone, Debug)]
+        pub enum Message {
+            Token(String),
+            Finish,
+        }
+    }
+
     #[derive(Serialize, Deserialize, Clone, Debug)]
-    pub enum Message {}
+    pub enum Message {
+        Message {
+            chat: ChatId,
+            content: chat::Message,
+        },
+    }
 }

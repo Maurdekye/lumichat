@@ -7,8 +7,9 @@ use actix::{Actor, Addr, StreamHandler};
 use actix_files as fs;
 use actix_identity::{Identity, IdentityMiddleware};
 use actix_session::{storage::RedisSessionStore, SessionMiddleware};
+use actix_web::body::BoxBody;
 use actix_web::cookie::Key;
-use actix_web::web::{self, Data};
+use actix_web::web::{self, Data, Json};
 use actix_web::{get, post, App, HttpMessage, HttpRequest, HttpResponse, HttpServer, Responder};
 use actix_web_actors::ws::{self, WsResponseBuilder};
 use bcrypt::{hash, verify, DEFAULT_COST};
@@ -17,21 +18,42 @@ use diesel::insert_into;
 use diesel::prelude::*;
 use diesel::r2d2::{self, ConnectionManager};
 use diesel::Insertable;
-use shared::create_user::PasswordValidationError;
 
-use shared::model::{AuthorType, Chat, FullUser, Message};
-use shared::{create_user, login, me, new_chat, websocket};
+use serde::Serialize;
+use shared::{api::*, model::*, websocket};
 
-use shared::schema::chats::dsl::*;
-use shared::schema::messages::dsl::*;
-use shared::schema::users::dsl::*;
+use shared::schema::{
+    chats::dsl as chats_dsl, messages::dsl as messages_dsl, users::dsl as users_dsl,
+};
 
-type Pool = r2d2::Pool<ConnectionManager<PgConnection>>;
-type PoolConnection = r2d2::PooledConnection<ConnectionManager<PgConnection>>;
-type AppState = Arc<RwLock<State>>;
+type Database = r2d2::Pool<ConnectionManager<PgConnection>>;
+type DatabaseConnection = r2d2::PooledConnection<ConnectionManager<PgConnection>>;
 
-fn validate_password(_password: &str) -> Result<(), PasswordValidationError> {
+fn validate_password(_password: &str) -> Result<(), create_user::PasswordValidationError> {
     Ok(()) // no validation for now
+}
+
+enum Response<T> {
+    Okay(T),
+    BadRequest(T),
+    Unauthorized,
+}
+
+use self::Response::*;
+
+impl<T> Responder for Response<T>
+where
+    T: Serialize,
+{
+    type Body = BoxBody;
+
+    fn respond_to(self, _: &HttpRequest) -> HttpResponse<Self::Body> {
+        match self {
+            Okay(payload) => HttpResponse::Ok().json(payload),
+            BadRequest(payload) => HttpResponse::BadRequest().json(payload),
+            Unauthorized => HttpResponse::Unauthorized().finish(),
+        }
+    }
 }
 
 struct Websocket;
@@ -73,13 +95,25 @@ impl actix::Handler<WebsocketMessage> for Websocket {
     }
 }
 
-struct State {
+#[derive(Clone)]
+struct Config {
     admin_signup: bool,
-    websock_connections: HashMap<i32, Vec<Addr<Websocket>>>,
 }
 
-impl State {
-    pub fn send_message(&mut self, user_id: i32, message: websocket::Message) {
+struct StateInner {
+    websock_connections: HashMap<UserId, Vec<Addr<Websocket>>>,
+}
+
+impl Default for StateInner {
+    fn default() -> Self {
+        Self {
+            websock_connections: Default::default(),
+        }
+    }
+}
+
+impl StateInner {
+    pub fn send_message(&mut self, user_id: UserId, message: websocket::Message) {
         if let Some(connections) = self.websock_connections.get_mut(&user_id) {
             connections.retain(Addr::connected);
             for connection in connections.iter_mut() {
@@ -102,24 +136,26 @@ impl State {
     }
 }
 
+type State = Arc<RwLock<StateInner>>;
+
 trait UserIdFromIdentity {
-    fn user_id(&self) -> Option<i32>;
+    fn user_id(&self) -> Option<UserId>;
 }
 
 impl UserIdFromIdentity for Identity {
-    fn user_id(&self) -> Option<i32> {
-        self.id().ok()?.parse::<i32>().ok()
+    fn user_id(&self) -> Option<UserId> {
+        self.id().ok()?.parse::<UserId>().ok()
     }
 }
 
 trait FullUserFromIdentity {
-    fn user(&self, db: &mut PoolConnection) -> Option<FullUser>;
+    fn user(&self, db: &mut DatabaseConnection) -> Option<FullUser>;
 }
 
 impl FullUserFromIdentity for Identity {
-    fn user(&self, db: &mut PoolConnection) -> Option<FullUser> {
+    fn user(&self, db: &mut DatabaseConnection) -> Option<FullUser> {
         let user_id = self.user_id()?;
-        users
+        users_dsl::users
             .find(user_id)
             .first::<FullUser>(db)
             .optional()
@@ -129,7 +165,7 @@ impl FullUserFromIdentity for Identity {
 }
 
 impl FullUserFromIdentity for Option<Identity> {
-    fn user(&self, db: &mut PoolConnection) -> Option<FullUser> {
+    fn user(&self, db: &mut DatabaseConnection) -> Option<FullUser> {
         self.as_ref().and_then(|ident| ident.user(db))
     }
 }
@@ -141,7 +177,7 @@ async fn ws_handler(
     request: HttpRequest,
     stream: web::Payload,
     identity: Identity,
-    state: Data<AppState>,
+    state: Data<State>,
 ) -> impl Responder {
     println!("/ws");
     let user_id = identity.user_id().expect("Failed to get user id");
@@ -170,13 +206,13 @@ pub struct NewFullUser<'a> {
 
 #[post("/admin-signup")]
 async fn admin_signup_handler(
-    body: web::Json<create_user::Request>,
-    db: Data<Pool>,
-    state: Data<State>,
-) -> impl Responder {
+    body: Json<create_user::Request>,
+    db: Data<Database>,
+    config: Data<Config>,
+) -> Response<create_user::Response> {
     // check if admin signup is enabled
-    if !state.admin_signup {
-        return HttpResponse::Unauthorized().finish();
+    if !config.admin_signup {
+        return Unauthorized;
     }
 
     // proceed to user creation
@@ -187,14 +223,14 @@ async fn admin_signup_handler(
 #[post("/create-user")]
 async fn create_user_handler(
     identity: Identity,
-    body: web::Json<create_user::Request>,
-    db: Data<Pool>,
-) -> impl Responder {
+    body: Json<create_user::Request>,
+    db: Data<Database>,
+) -> Response<create_user::Response> {
     // check if operating user is an admin
     let mut db = db.get().expect("Database not available");
     let user = identity.user(&mut db).expect("Unable to load user profile");
     if !user.admin {
-        return HttpResponse::Unauthorized().finish();
+        return Unauthorized;
     }
 
     // proceed to user creation
@@ -202,31 +238,31 @@ async fn create_user_handler(
 }
 
 async fn create_user_inner(
-    body: web::Json<create_user::Request>,
-    db: &mut PoolConnection,
+    body: Json<create_user::Request>,
+    db: &mut DatabaseConnection,
     make_admin: bool,
-) -> HttpResponse {
+) -> Response<create_user::Response> {
     // decode request
     let body = body.into_inner();
     println!("/create-user: {body:#?}");
 
     // validate password
     if let Err(validation_error) = validate_password(&body.password) {
-        return HttpResponse::BadRequest().json(create_user::Response::Failure(
+        return BadRequest(create_user::Response::Failure(
             create_user::FailureReason::InvalidPassword(validation_error),
         ));
     }
 
     // check for existing users
-    let user_query = users
-        .filter(username.eq(&body.username))
-        .or_filter(email.eq(&body.email))
+    let user_query = users_dsl::users
+        .filter(users_dsl::username.eq(&body.username))
+        .or_filter(users_dsl::email.eq(&body.email))
         .first::<FullUser>(db)
         .optional()
         .expect("Error querying database");
 
     if let Some(_) = user_query {
-        return HttpResponse::BadRequest().json(create_user::Response::Failure(
+        return BadRequest(create_user::Response::Failure(
             create_user::FailureReason::UserExists,
         ));
     }
@@ -240,25 +276,25 @@ async fn create_user_inner(
     };
 
     // Insert new user into the database
-    let new_user: FullUser = insert_into(users)
+    let new_user: FullUser = insert_into(users_dsl::users)
         .values(&new_user)
         .get_result(db)
         .expect("Error inserting new user");
 
     // Respond successfully
-    HttpResponse::Ok().json(create_user::Response::Success(new_user.into()))
+    Okay(create_user::Response::Success(new_user.into()))
 }
 
 #[post("/login")]
 async fn login_handler(
     user: Option<Identity>,
     request: HttpRequest,
-    body: web::Json<login::Request>,
-    db: Data<Pool>,
-) -> impl Responder {
+    body: Json<login::Request>,
+    db: Data<Database>,
+) -> Response<login::Response> {
     // check if already logged in
     if user.is_some() {
-        return HttpResponse::BadRequest().json(login::Response::Failure(
+        return BadRequest(login::Response::Failure(
             login::FailureReason::AlreadyLoggedIn,
         ));
     }
@@ -269,46 +305,50 @@ async fn login_handler(
 
     // check database for user
     let mut db = db.get().expect("Database not available");
-    let user_query = users
-        .filter(username.eq(&body.identifier).or(email.eq(&body.identifier)))
+    let user_query = users_dsl::users
+        .filter(
+            users_dsl::username
+                .eq(&body.identifier)
+                .or(users_dsl::email.eq(&body.identifier)),
+        )
         .first::<FullUser>(&mut db)
         .optional()
         .expect("Error querying database");
 
     let Some(user) = user_query else {
-        return HttpResponse::BadRequest().json(login::Response::Failure(
+        return BadRequest(login::Response::Failure(
             login::FailureReason::UserDoesNotExist,
         ));
     };
 
     // check password
     if !verify(&body.password, &user.password_hash).expect("Error decrypting password") {
-        return HttpResponse::BadRequest().json(login::Response::Failure(
+        return BadRequest(login::Response::Failure(
             login::FailureReason::InvalidPassword,
         ));
     }
 
     // log user in
     Identity::login(&request.extensions(), user.id.to_string()).unwrap();
-    HttpResponse::Ok().json(login::Response::Success(user.into()))
+    Okay(login::Response::Success(user.into()))
 }
 
 #[get("/me")]
-async fn me_handler(identity: Option<Identity>, db: Data<Pool>) -> impl Responder {
+async fn me_handler(identity: Option<Identity>, db: Data<Database>) -> Response<me::Response> {
     println!("/me");
     let mut db = db.get().expect("Database not available");
     let response = match identity.user(&mut db) {
         None => me::Response::Anonymous,
         Some(user) => me::Response::User(user.into()),
     };
-    HttpResponse::Ok().json(response)
+    Okay(response)
 }
 
 #[post("/logout")]
 async fn logout_handler(user: Identity) -> impl Responder {
     println!("/logout");
     user.logout();
-    HttpResponse::Ok()
+    HttpResponse::Ok().finish()
 }
 
 // Chatting
@@ -317,31 +357,31 @@ async fn logout_handler(user: Identity) -> impl Responder {
 #[diesel(table_name = shared::schema::chats)]
 struct NewChat<'a> {
     name: &'a str,
-    owner: i32,
+    owner: UserId,
     created: NaiveDateTime,
 }
 
 #[derive(Insertable)]
 #[diesel(table_name = shared::schema::messages)]
 struct NewMessage<'a> {
-    chat_id: i32,
+    chat: ChatId,
     author: AuthorType,
     content: &'a str,
     created: NaiveDateTime,
 }
 
-#[get("/new-chat")]
+#[post("/new-chat")]
 async fn new_chat_handler(
-    user: Identity,
-    db: Data<Pool>,
-    body: web::Json<new_chat::Request>,
-) -> impl Responder {
+    identity: Identity,
+    db: Data<Database>,
+    body: Json<new_chat::Request>,
+) -> Response<new_chat::Response> {
     // decode request
     let body = body.into_inner();
     println!("/new-chat: {body:#?}");
 
     // put new chat into database
-    let user_id: i32 = user.id().unwrap().parse().unwrap();
+    let user_id = identity.user_id().expect("Failed to get user id");
     let mut db = db.get().expect("Database not available");
     let now = Utc::now().naive_utc();
     let new_chat = NewChat {
@@ -349,28 +389,221 @@ async fn new_chat_handler(
         owner: user_id,
         created: now.clone(),
     };
-    let new_chat: Chat = insert_into(chats)
+    let new_chat: Chat = insert_into(chats_dsl::chats)
         .values(&new_chat)
         .get_result(&mut db)
         .expect("Error insterting new chat");
 
+    // place new chat message in database
+    let assistant_message =
+        submit_chat_message(&mut db, user_id, new_chat.id, &body.initial_message).await;
+
+    // send chat id and assistant message id back
+    Okay(new_chat::Response {
+        chat: new_chat.id,
+        assistant_message,
+    })
+}
+
+#[post("/chat-message")]
+async fn chat_message_handler(
+    identity: Identity,
+    db: Data<Database>,
+    body: Json<chat_message::Request>,
+) -> Response<chat_message::Response> {
+    // decode request
+    let body = body.into_inner();
+    println!("/chat-message: {body:#?}");
+
+    // check database that chat exists
+    let mut db = db.get().expect("Database not available");
+    let Some(associated_chat): Option<Chat> = chats_dsl::chats
+        .find(body.chat)
+        .first(&mut db)
+        .optional()
+        .expect("Error querying database")
+    else {
+        return BadRequest(chat_message::Response::Failure(
+            chat_message::FailureReason::ChatDoesNotExist,
+        ));
+    };
+
+    // confirm that user owns the given chat
+    let user_id = identity.user_id().expect("Failed to get user id");
+    if associated_chat.owner != user_id {
+        return BadRequest(chat_message::Response::Failure(
+            chat_message::FailureReason::ChatNotOwnedByUser,
+        ));
+    }
+
+    // place new chat message in database
+    let assistant_message = submit_chat_message(&mut db, user_id, body.chat, &body.message).await;
+
+    // send assistant message id back
+    Okay(chat_message::Response::Success { assistant_message })
+}
+
+async fn submit_chat_message(
+    db: &mut DatabaseConnection,
+    user: UserId,
+    chat: ChatId,
+    content: &str,
+) -> MessageId {
     // put new message into database
+    let now = Utc::now().naive_utc();
     let new_message = NewMessage {
-        chat_id: new_chat.id,
+        chat,
         author: AuthorType::User,
-        content: &body.initial_message,
+        content,
         created: now,
     };
-    let new_message: Message = insert_into(messages)
+    let _: Message = insert_into(messages_dsl::messages)
         .values(&new_message)
-        .get_result(&mut db)
+        .get_result(db)
         .expect("Error inserting message into new chat");
 
-    // send chat and message back
-    HttpResponse::Ok().json(new_chat::Response {
-        chat: new_chat,
-        messages: vec![new_message],
+    // put empty assistant response into database
+    let assistant_message = NewMessage {
+        chat,
+        author: AuthorType::AssistantResponding,
+        content: "",
+        created: now,
+    };
+    let assistant_message: Message = insert_into(messages_dsl::messages)
+        .values(&assistant_message)
+        .get_result(db)
+        .expect("Error inserting assistant message into new chat");
+
+    // TODO: code here to spawn a new thread to query the llm api and start sending message packets back
+    let _user = user; // spawn a new task here
+
+    assistant_message.id
+}
+
+#[get("/list-chats")]
+async fn list_chats_handler(identity: Identity, db: Data<Database>) -> impl Responder {
+    println!("/list-chats");
+
+    // get chats owned by user
+    let user_id = identity.user_id().expect("Failed to get user id");
+    let mut db = db.get().expect("Database not available");
+    let chats: Vec<Chat> = chats_dsl::chats
+        .filter(chats_dsl::owner.eq(user_id))
+        .load(&mut db)
+        .expect("Error querying database");
+
+    HttpResponse::Ok().json(list_chats::Response { chats })
+}
+
+enum GetChatError {
+    ChatDoesNotExist,
+    ChatNotOwnedByUser,
+}
+
+macro_rules! get_chat_error_into {
+    ($typ:ty) => {
+        impl Into<$typ> for GetChatError {
+            fn into(self) -> $typ {
+                match self {
+                    Self::ChatDoesNotExist => <$typ>::ChatDoesNotExist,
+                    Self::ChatNotOwnedByUser => <$typ>::ChatNotOwnedByUser,
+                }
+            }
+        }
+    };
+}
+
+fn get_chat_by_user(
+    identity: Identity,
+    chat: ChatId,
+    db: &mut DatabaseConnection,
+) -> Result<Chat, GetChatError> {
+    // get associated chat
+    let Some(chat): Option<Chat> = chats_dsl::chats
+        .find(chat)
+        .first(db)
+        .optional()
+        .expect("Error querying database")
+    else {
+        return Err(GetChatError::ChatDoesNotExist);
+    };
+
+    // confirm that user owns the given chat
+    let user_id = identity.user_id().expect("Failed to get user id");
+    if chat.owner != user_id {
+        return Err(GetChatError::ChatNotOwnedByUser);
+    }
+
+    Ok(chat)
+}
+
+get_chat_error_into!(check_chat::FailureReason);
+
+#[post("/check-chat")]
+async fn check_chat_handler(
+    identity: Identity,
+    body: Json<check_chat::Request>,
+    db: Data<Database>,
+) -> Response<check_chat::Response> {
+    // decode response
+    let body = body.into_inner();
+    println!("/check-chat: {body:#?}");
+
+    // get associated chat
+    let mut db = db.get().expect("Database not available");
+    let chat = match get_chat_by_user(identity, body.chat, &mut db) {
+        Ok(chat) => chat,
+        Err(err) => return BadRequest(check_chat::Response::Failure(err.into())),
+    };
+
+    // get most recent message timestamp
+    let Some(most_recent_message): Option<Message> = messages_dsl::messages
+        .filter(messages_dsl::chat.eq(chat.id))
+        .order(messages_dsl::created.desc())
+        .first(&mut db)
+        .optional()
+        .expect("Error querying database")
+    else {
+        return BadRequest(check_chat::Response::Failure(
+            check_chat::FailureReason::ChatHasNoMessages,
+        ));
+    };
+
+    // respond with message time
+    Okay(check_chat::Response::Success {
+        most_recent_message_created: most_recent_message.created,
     })
+}
+
+get_chat_error_into!(list_messages::FailureReason);
+
+#[get("/list-messages")]
+async fn list_messages_handler(
+    identity: Identity,
+    body: Json<list_messages::Request>,
+    db: Data<Database>,
+) -> Response<list_messages::Response> {
+    // decode response
+    let body = body.into_inner();
+    println!("/list-messages: {body:#?}");
+
+    // get associated chat
+    let mut db = db.get().expect("Database not available");
+    let chat = match get_chat_by_user(identity, body.chat, &mut db) {
+        Ok(chat) => chat,
+        Err(err) => return BadRequest(list_messages::Response::Failure(err.into())),
+    };
+
+    // get messages
+    let messages = messages_dsl::messages
+        .filter(messages_dsl::chat.eq(chat.id))
+        .order(messages_dsl::created.desc())
+        .load(&mut db)
+        .expect("Error querying database");
+
+    // TODO: fetch in progress messages to deliver to the user as well
+
+    Okay(list_messages::Response::Success { messages })
 }
 
 #[actix_web::main]
@@ -392,7 +625,7 @@ async fn main() -> std::io::Result<()> {
 
     // connect to db
     let manager = ConnectionManager::<PgConnection>::new(database_url);
-    let pool: Pool = r2d2::Pool::builder()
+    let pool: Database = r2d2::Pool::builder()
         .build(manager)
         .expect("Failed to create pool.");
     println!("Connected to database");
@@ -401,18 +634,17 @@ async fn main() -> std::io::Result<()> {
     let redis = RedisSessionStore::new(redis_url).await.unwrap();
     println!("Connected to redis");
 
-    // initialize app state
-    let app_state = Arc::new(RwLock::new(State {
-        admin_signup,
-        websock_connections: Default::default(),
-    }));
+    // initialize app state & config
+    let state = State::default();
+    let config = Config { admin_signup };
 
     // serve app
     println!("Running on {}", host_addr);
     HttpServer::new(move || {
         App::new()
             .app_data(Data::new(pool.clone()))
-            .app_data(Data::new(app_state.clone()))
+            .app_data(Data::new(state.clone()))
+            .app_data(Data::new(config.clone()))
             .wrap(IdentityMiddleware::default())
             .wrap(SessionMiddleware::new(
                 redis.clone(),
@@ -424,9 +656,18 @@ async fn main() -> std::io::Result<()> {
             .service(login_handler)
             .service(logout_handler)
             .service(me_handler)
+            .service(new_chat_handler)
+            .service(chat_message_handler)
+            .service(list_chats_handler)
+            .service(check_chat_handler)
+            .service(list_messages_handler)
             .service(fs::Files::new("/", "./front/dist").index_file("index.html"))
     })
-    .workers(std::thread::available_parallelism().map(Into::into).unwrap_or(1))
+    .workers(
+        std::thread::available_parallelism()
+            .map(Into::into)
+            .unwrap_or(1),
+    )
     .bind(host_addr)?
     .run()
     .await
