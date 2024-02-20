@@ -409,7 +409,7 @@ async fn submit_chat_message(
             let mut interval = time::interval(Duration::from_millis(20));
             let message = assistant_message.id;
             let mock_text = "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.";
-            
+
             // send a bunch of tokens in chunks
             for chunk in mock_text
                 .chars()
@@ -655,7 +655,8 @@ async fn main() -> std::io::Result<()> {
     let port = env::var("PORT").expect("PORT must be set");
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let redis_url = env::var("REDIS_URL").unwrap_or("redis://127.0.0.1:6379".to_string());
-    let admin_signup = env::var("ADMIN_SIGNUP") == Ok("TRUE".to_string());
+    let admin_signup = env::var("ADMIN_SIGNUP").map(|val| val.trim().to_ascii_uppercase())
+        == Ok("TRUE".to_string());
     let host_addr = format!("0.0.0.0:{}", port);
 
     println!("port: {port}");
