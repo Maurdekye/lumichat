@@ -936,6 +936,7 @@ dependencies = [
  "gloo-net 0.5.0",
  "gloo-timers 0.3.0",
  "gloo-utils 0.2.0",
+ "rand",
  "serde",
  "serde_json",
  "shared",

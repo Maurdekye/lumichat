@@ -266,27 +266,39 @@ mod session {
 
     use crate::{host, RcRefCell};
 
+    type ElemKey = u64;
+
     fn push_message(
         message_list: &mut Vec<Rc<RefCell<Message>>>,
         message_index: &mut HashMap<MessageId, Rc<RefCell<Message>>>,
         message: model::Message,
+        key: ElemKey,
     ) {
         let message_id = message.id;
-        let message = RcRefCell::new(Message::Real(message));
+        let message = RcRefCell::new(Message {
+            key,
+            inner: MessageInner::Real(message),
+        });
         message_list.push(message.clone());
         message_index.insert(message_id, message);
     }
 
     type WebsocketWriter = SplitSink<WebSocket, gloo_net::websocket::Message>;
 
-    pub enum Message {
+    pub enum MessageInner {
         Skeleton { content: String },
         Real(model::Message),
     }
 
-    pub enum Chat {
+    pub struct Message {
+        key: ElemKey,
+        inner: MessageInner,
+    }
+
+    pub enum ChatInner {
         Skeleton {
-            message: String,
+            user_message: String,
+            user_message_key: ElemKey,
         },
         Real {
             chat: model::Chat,
@@ -295,11 +307,32 @@ mod session {
         },
     }
 
+    pub struct Chat {
+        key: ElemKey,
+        inner: ChatInner,
+    }
+
     impl Chat {
-        pub fn name(&self) -> &str {
-            match self {
-                Chat::Skeleton { .. } => "New Chat",
-                Chat::Real { chat, .. } => &chat.name,
+        pub fn name(&self) -> String {
+            match &self.inner {
+                ChatInner::Skeleton { .. } => "New Chat".to_string(),
+                ChatInner::Real { chat, .. } => chat.name.to_string(),
+            }
+        }
+
+        pub fn is_available(&self) -> bool {
+            match &self.inner {
+                ChatInner::Skeleton { .. } => false,
+                ChatInner::Real { message_list, .. } => message_list
+                    .last()
+                    .map(|m| match &RefCell::borrow(m).inner {
+                        MessageInner::Real(model::Message {
+                            author: AuthorType::AssistantFinished,
+                            ..
+                        }) => true,
+                        _ => false,
+                    })
+                    .unwrap_or(true),
             }
         }
     }
@@ -323,8 +356,13 @@ mod session {
         ChatMessageResponse {
             chat: Rc<RefCell<Chat>>,
             response: chat_message::Response,
+            user_message_key: ElemKey,
         },
-        NewChatResponse(new_chat::Response),
+        NewChatResponse {
+            response: new_chat::Response,
+            chat_key: ElemKey,
+            user_message_key: ElemKey,
+        },
         WebsocketConnect(WebsocketWriter),
         WebsocketData(websocket::Message),
         WebsocketDisconnect,
@@ -373,16 +411,20 @@ mod session {
                     let content = self.message_input.clone();
                     match &self.current_chat {
                         Some(chat) => {
-                            let chat_id = match &mut *chat.borrow_mut() {
-                                Chat::Skeleton { .. } => {
+                            let user_message_key: ElemKey = rand::random();
+                            let chat_id = match &mut chat.borrow_mut().inner {
+                                ChatInner::Skeleton { .. } => {
                                     error!("Not allowed to submit a message to a skeleton chat!");
                                     return false;
                                 }
-                                Chat::Real {
+                                ChatInner::Real {
                                     chat, message_list, ..
                                 } => {
-                                    message_list.push(RcRefCell::new(Message::Skeleton {
-                                        content: content.clone(),
+                                    message_list.push(RcRefCell::new(Message {
+                                        key: user_message_key,
+                                        inner: MessageInner::Skeleton {
+                                            content: content.clone(),
+                                        },
                                     }));
                                     chat.id
                                 }
@@ -396,74 +438,118 @@ mod session {
                                         message: content
                                     }
                                 ));
-                                Msg::ChatMessageResponse { chat, response }
+                                Msg::ChatMessageResponse {
+                                    chat,
+                                    response,
+                                    user_message_key,
+                                }
                             });
                         }
                         None => {
-                            let new_chat_skeleton = RcRefCell::new(Chat::Skeleton {
-                                message: content.clone(),
+                            let chat_key: ElemKey = rand::random();
+                            let user_message_key: ElemKey = rand::random();
+                            let new_chat_skeleton = RcRefCell::new(Chat {
+                                key: chat_key,
+                                inner: ChatInner::Skeleton {
+                                    user_message: content.clone(),
+                                    user_message_key,
+                                },
                             });
                             self.chat_list.push(new_chat_skeleton.clone());
                             self.current_chat = Some(new_chat_skeleton);
-                            ctx.link().send_future(async {
+                            ctx.link().send_future(async move {
                                 let response: new_chat::Response = json!(post!(
                                     "/new-chat",
                                     new_chat::Request {
                                         initial_message: content
                                     }
                                 ));
-                                Msg::NewChatResponse(response)
+                                Msg::NewChatResponse {
+                                    response,
+                                    chat_key,
+                                    user_message_key,
+                                }
                             });
                         }
                     }
                     self.message_input = String::new();
                 }
-                Msg::ChatMessageResponse { chat, response } => {
-                    if let Chat::Real {
+                Msg::ChatMessageResponse {
+                    chat,
+                    response,
+                    user_message_key,
+                } => {
+                    if let ChatInner::Real {
                         message_list,
                         message_index,
                         ..
-                    } = &mut *chat.borrow_mut()
+                    } = &mut chat.borrow_mut().inner
                     {
                         match response {
                             chat_message::Response::Success {
                                 user_message,
                                 assistant_response,
                             } => {
-                                push_message(message_list, message_index, user_message);
-                                push_message(message_list, message_index, assistant_response);
+                                push_message(
+                                    message_list,
+                                    message_index,
+                                    user_message,
+                                    user_message_key,
+                                );
+                                let assistant_message_key: ElemKey = rand::random();
+                                push_message(
+                                    message_list,
+                                    message_index,
+                                    assistant_response,
+                                    assistant_message_key,
+                                );
                             }
                             chat_message::Response::Failure(reason) => {
                                 error!("Chat message failure:", format!("{reason:?}"));
                             }
                         };
-                        message_list.retain(|m| matches!(&*m.borrow(), Message::Real(_)));
+                        message_list
+                            .retain(|m| matches!(&RefCell::borrow(m).inner, MessageInner::Real(_)));
                     } else {
                         error!("Recieved new chat message for skeleton chat?");
                     };
                 }
-                Msg::NewChatResponse(response) => {
+                Msg::NewChatResponse {
+                    response,
+                    chat_key,
+                    user_message_key,
+                } => {
                     let chat = response.chat;
                     let chat_id = chat.id;
                     let mut message_list = Vec::new();
                     let mut message_index = HashMap::new();
-                    push_message(&mut message_list, &mut message_index, response.user_message);
+                    push_message(
+                        &mut message_list,
+                        &mut message_index,
+                        response.user_message,
+                        user_message_key,
+                    );
+                    let assistant_message_key: ElemKey = rand::random();
                     push_message(
                         &mut message_list,
                         &mut message_index,
                         response.assistant_response,
+                        assistant_message_key,
                     );
-                    let new_chat = Chat::Real {
-                        chat,
-                        message_list,
-                        message_index,
+                    let new_chat = Chat {
+                        key: chat_key,
+                        inner: ChatInner::Real {
+                            chat,
+                            message_list,
+                            message_index,
+                        },
                     };
                     let new_chat = RcRefCell::new(new_chat);
                     self.current_chat = Some(new_chat.clone());
                     self.chat_list.push(new_chat.clone());
                     self.chat_index.insert(chat_id, new_chat.clone());
                     self.chat_list
-                        .retain(|c| matches!(&*c.borrow(), Chat::Real { .. }));
+                        .retain(|c| matches!(&RefCell::borrow(c).inner, ChatInner::Real { .. }));
                 }
                 Msg::WebsocketConnect(writer) => {
                     log!("websocket connected");
@@ -532,7 +618,7 @@ mod session {
                         </div>
                         <div class="chats-list">
                             {
-                                self.chat_list.iter().map(|chat| {
+                                for self.chat_list.iter().map(|chat| {
                                     let onclick = {
                                         // yes, i know what you're thinking, but both clones are necessary
                                         // the first is so that the callback closure has its own copy
@@ -541,10 +627,12 @@ mod session {
                                         let chat = chat.clone();
                                         ctx.link().callback(move |_| Msg::SelectChat(chat.clone()))
                                     };
+                                    let chat = RefCell::borrow(chat);
+                                    let key = chat.key;
                                     html! {
-                                        <div class="chat" {onclick}><p>{&chat.borrow().name()}</p></div>
+                                        <div class="chat" {key} {onclick}><p>{&chat.name()}</p></div>
                                     }
-                                }).collect::<Vec<_>>()
+                                })
                             }
                             <div class="new-chat">
                                 <button onclick={ctx.link().callback(|_| Msg::NewChat)}>{" + New Chat"}</button>
@@ -557,63 +645,60 @@ mod session {
                     <div class="chat-window">
                         <div class="chat-input-container">
                             <input class="chat-input"
-                            oninput={ctx.link().callback(|e: InputEvent| {
-                                let input: HtmlInputElement = e.target_unchecked_into();
-                                Msg::UpdateMessage(input.value())
-                            })}
-                            onkeypress={
-                                let message_input = self.message_input.clone();
-                                ctx.link().batch_callback(move |e: KeyboardEvent| {
-                                if e.key() == "Enter" {
-                                    e.prevent_default();
-                                    if !message_input.is_empty() {
-                                        return Some(Msg::SubmitMessage)
+                                disabled={self.current_chat.as_ref().is_some_and(|c| !RefCell::borrow(c).is_available())}
+                                oninput={ctx.link().callback(|e: InputEvent| {
+                                    let input: HtmlInputElement = e.target_unchecked_into();
+                                    Msg::UpdateMessage(input.value())
+                                })}
+                                onkeypress={
+                                    let message_input = self.message_input.clone();
+                                    ctx.link().batch_callback(move |e: KeyboardEvent| {
+                                    if e.key() == "Enter" {
+                                        e.prevent_default();
+                                        if !message_input.is_empty() {
+                                            return Some(Msg::SubmitMessage)
+                                        }
                                     }
-                                }
-                                None
-                            })}
-                            value={self.message_input.clone()}
+                                    None
+                                })}
+                                value={self.message_input.clone()}
                             />
                         </div>
                         <div class="chat-messages">
                             {
                                 if let Some(chat) = &self.current_chat {
-                                    match &*chat.borrow() {
-                                        Chat::Skeleton { message } => {
+                                    let chat = RefCell::borrow(chat);
+                                    let messages = match &chat.inner {
+                                        ChatInner::Skeleton { user_message, user_message_key } => {
                                             vec![
-                                                html! {
-                                                    <div class={classes!("message-row", "user")}>
-                                                        <div class="message">{&message}</div>
-                                                    </div>
-                                                }
+                                                ("user", user_message.clone(), *user_message_key)
                                             ]
                                         }
-                                        Chat::Real { message_list, .. } => {
+                                        ChatInner::Real { message_list, .. } => {
                                             message_list.iter().map(|message| {
-                                                match &*message.borrow() {
-                                                    Message::Skeleton { content } => html! {
-                                                        <div class={classes!("message-row", "user")}>
-                                                            <div class="message">{&content}</div>
-                                                        </div>
-                                                    },
-                                                    Message::Real(message) => {
+                                                let message = &*RefCell::borrow(message);
+                                                let key = message.key;
+                                                match &message.inner {
+                                                    MessageInner::Skeleton { content } => ("user", content.clone(), key),
+                                                    MessageInner::Real(message) => {
                                                         let author = match message.author {
                                                             AuthorType::User => "user",
                                                             AuthorType::AssistantResponding
                                                             | AuthorType::AssistantFinished => "assistant"
                                                         };
-                                                        html! {
-                                                            <div class={classes!("message-row", author)}>
-                                                                <div class="message">{&message.content}</div>
-                                                            </div>
-                                                        }
+                                                        (author, message.content.clone(), key)
                                                     },
                                                 }
-                                            }).collect::<Vec<_>>()
-                                        },
-                                    }
+                                            })
+                                        }.collect::<Vec<_>>(),
+                                    };
+                                    messages.into_iter().map(|(author, message, key)| html! {
+                                        <div {key} class={classes!("message-row", author)}>
+                                            <div class="message">{message}</div>
+                                        </div>
+                                    }).collect::<Html>()
                                 } else {
-                                    Vec::new()
+                                    html! { <></> }
                                 }
                             }
                         </div>
