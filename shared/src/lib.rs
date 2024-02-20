@@ -143,7 +143,7 @@ pub mod api {
     pub mod new_chat {
         use serde::{Deserialize, Serialize};
 
-        use crate::model::{ChatId, MessageId};
+        use crate::model::{Chat, Message};
 
         #[derive(Serialize, Deserialize, Clone, Debug)]
         pub struct Request {
@@ -152,15 +152,16 @@ pub mod api {
 
         #[derive(Serialize, Deserialize, Clone, Debug)]
         pub struct Response {
-            pub chat: ChatId,
-            pub assistant_message: MessageId,
+            pub chat: Chat,
+            pub user_message: Message,
+            pub assistant_response: Message,
         }
     }
 
     pub mod chat_message {
         use serde::{Deserialize, Serialize};
 
-        use crate::model::{ChatId, MessageId};
+        use crate::model::{ChatId, Message};
 
         #[derive(Serialize, Deserialize, Clone, Debug)]
         pub struct Request {
@@ -176,7 +177,10 @@ pub mod api {
 
         #[derive(Serialize, Deserialize, Clone, Debug)]
         pub enum Response {
-            Success { assistant_message: MessageId },
+            Success {
+                user_message: Message,
+                assistant_response: Message,
+            },
             Failure(FailureReason),
         }
     }

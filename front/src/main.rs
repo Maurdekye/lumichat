@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use gloo_utils::window;
 use shared::{api::me, model::User};
@@ -36,6 +36,14 @@ impl DurFrom for u64 {
 impl DurFrom for f64 {
     fn dur_from(self) -> Duration {
         Duration::from_secs_f64(self)
+    }
+}
+
+struct RcRefCell;
+
+impl RcRefCell {
+    fn new<T>(value: T) -> Rc<RefCell<T>> {
+        Rc::new(RefCell::new(value))
     }
 }
 
@@ -242,38 +250,64 @@ mod login {
 }
 
 mod session {
-    use std::{cell::RefCell, rc::Rc};
+    use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
-    use futures::StreamExt;
     use futures::stream::SplitSink;
+    use futures::StreamExt;
     use gloo_console::{error, log};
-    use gloo_net::websocket::{futures::WebSocket, Message};
-    use shared::{model::User, websocket};
+    use gloo_net::websocket::futures::WebSocket;
+    use shared::{
+        api::{chat_message, new_chat},
+        model::{self, AuthorType, ChatId, MessageId, User},
+        websocket,
+    };
     use web_sys::HtmlInputElement;
     use yew::prelude::*;
 
-    use crate::host;
+    use crate::{host, RcRefCell};
+
+    fn push_message(
+        message_list: &mut Vec<Rc<RefCell<Message>>>,
+        message_index: &mut HashMap<MessageId, Rc<RefCell<Message>>>,
+        message: model::Message,
+    ) {
+        let message_id = message.id;
+        let message = RcRefCell::new(Message::Real(message));
+        message_list.push(message.clone());
+        message_index.insert(message_id, message);
+    }
 
     type WebsocketWriter = SplitSink<WebSocket, gloo_net::websocket::Message>;
 
-    pub enum Author {
-        User,
-        Assistant,
+    pub enum Message {
+        Skeleton { content: String },
+        Real(model::Message),
     }
 
-    pub struct ChatMessage {
-        author: Author,
-        content: String,
+    pub enum Chat {
+        Skeleton {
+            message: String,
+        },
+        Real {
+            chat: model::Chat,
+            message_list: Vec<Rc<RefCell<Message>>>,
+            message_index: HashMap<MessageId, Rc<RefCell<Message>>>,
+        },
     }
 
-    pub struct Chat {
-        name: String,
-        messages: Vec<ChatMessage>,
+    impl Chat {
+        pub fn name(&self) -> &str {
+            match self {
+                Chat::Skeleton { .. } => "New Chat",
+                Chat::Real { chat, .. } => &chat.name,
+            }
+        }
     }
 
     pub struct Session {
         sidebar: bool,
-        chats: Vec<Rc<RefCell<Chat>>>,
+        chat_list: Vec<Rc<RefCell<Chat>>>,
+        chat_index: HashMap<ChatId, Rc<RefCell<Chat>>>,
         current_chat: Option<Rc<RefCell<Chat>>>,
         message_input: String,
         websocket: Option<WebsocketWriter>,
@@ -286,10 +320,11 @@ mod session {
         SelectChat(Rc<RefCell<Chat>>),
         UpdateMessage(String),
         SubmitMessage,
-        AssistantMessage {
-            content: String,
+        ChatMessageResponse {
             chat: Rc<RefCell<Chat>>,
+            response: chat_message::Response,
         },
+        NewChatResponse(new_chat::Response),
         WebsocketConnect(WebsocketWriter),
         WebsocketData(websocket::Message),
         WebsocketDisconnect,
@@ -308,7 +343,8 @@ mod session {
         fn create(_ctx: &Context<Self>) -> Self {
             Self {
                 sidebar: true,
-                chats: Vec::new(),
+                chat_list: Vec::new(),
+                chat_index: HashMap::new(),
                 current_chat: None,
                 message_input: String::new(),
                 websocket: None,
@@ -334,40 +370,100 @@ mod session {
                     self.message_input = message;
                 }
                 Msg::SubmitMessage => {
-                    let new_message = ChatMessage {
-                        author: Author::User,
-                        content: self.message_input.clone(),
-                    };
+                    let content = self.message_input.clone();
                     match &self.current_chat {
-                        Some(chat) => chat.borrow_mut().messages.push(new_message),
+                        Some(chat) => {
+                            let chat_id = match &mut *chat.borrow_mut() {
+                                Chat::Skeleton { .. } => {
+                                    error!("Not allowed to submit a message to a skeleton chat!");
+                                    return false;
+                                }
+                                Chat::Real {
+                                    chat, message_list, ..
+                                } => {
+                                    message_list.push(RcRefCell::new(Message::Skeleton {
+                                        content: content.clone(),
+                                    }));
+                                    chat.id
+                                }
+                            };
+                            let chat = chat.clone();
+                            ctx.link().send_future(async move {
+                                let response: chat_message::Response = json!(post!(
+                                    "/chat-message",
+                                    chat_message::Request {
+                                        chat: chat_id,
+                                        message: content
+                                    }
+                                ));
+                                Msg::ChatMessageResponse { chat, response }
+                            });
+                        }
                         None => {
-                            let new_chat = Rc::new(RefCell::new(Chat {
-                                name: "New Chat".to_string(),
-                                messages: vec![new_message],
-                            }));
-                            self.chats.push(new_chat.clone());
-                            self.current_chat = Some(new_chat);
+                            let new_chat_skeleton = RcRefCell::new(Chat::Skeleton {
+                                message: content.clone(),
+                            });
+                            self.chat_list.push(new_chat_skeleton.clone());
+                            self.current_chat = Some(new_chat_skeleton);
+                            ctx.link().send_future(async {
+                                let response: new_chat::Response = json!(post!(
+                                    "/new-chat",
+                                    new_chat::Request {
+                                        initial_message: content
+                                    }
+                                ));
+                                Msg::NewChatResponse(response)
+                            });
                         }
                     }
                     self.message_input = String::new();
-
-                    // simulate mock assistant response after delay
-                    if let Some(chat) = &mut self.current_chat {
-                        let chat = chat.clone();
-                        ctx.link().send_future(async {
-                            wait!(1 second);
-                            Msg::AssistantMessage {
-                                content: "Lorum Ipsum Dolor Sit Amet".to_string(),
-                                chat,
-                            }
-                        });
-                    }
                 }
-                Msg::AssistantMessage { content, chat } => {
-                    chat.borrow_mut().messages.push(ChatMessage {
-                        author: Author::Assistant,
-                        content,
-                    });
+                Msg::ChatMessageResponse { chat, response } => {
+                    if let Chat::Real {
+                        message_list,
+                        message_index,
+                        ..
+                    } = &mut *chat.borrow_mut()
+                    {
+                        match response {
+                            chat_message::Response::Success {
+                                user_message,
+                                assistant_response,
+                            } => {
+                                push_message(message_list, message_index, user_message);
+                                push_message(message_list, message_index, assistant_response);
+                            }
+                            chat_message::Response::Failure(reason) => {
+                                error!("Chat message failure:", format!("{reason:?}"));
+                            }
+                        };
+                        message_list.retain(|m| matches!(&*m.borrow(), Message::Real(_)));
+                    } else {
+                        error!("Recieved new chat message for skeleton chat?");
+                    };
+                }
+                Msg::NewChatResponse(response) => {
+                    let chat = response.chat;
+                    let chat_id = chat.id;
+                    let mut message_list = Vec::new();
+                    let mut message_index = HashMap::new();
+                    push_message(&mut message_list, &mut message_index, response.user_message);
+                    push_message(
+                        &mut message_list,
+                        &mut message_index,
+                        response.assistant_response,
+                    );
+                    let new_chat = Chat::Real {
+                        chat,
+                        message_list,
+                        message_index,
+                    };
+                    let new_chat = RcRefCell::new(new_chat);
+                    self.current_chat = Some(new_chat.clone());
+                    self.chat_list.push(new_chat.clone());
+                    self.chat_index.insert(chat_id, new_chat.clone());
+                    self.chat_list
+                        .retain(|c| matches!(&*c.borrow(), Chat::Real { .. }));
                 }
                 Msg::WebsocketConnect(writer) => {
                     log!("websocket connected");
@@ -385,7 +481,6 @@ mod session {
         }
 
         fn view(&self, ctx: &Context<Self>) -> Html {
-
             // attempt to establish websocket connection
             if self.websocket.is_none() {
                 let data_callback = ctx.link().callback(Msg::WebsocketData);
@@ -404,10 +499,11 @@ mod session {
                     };
                     let (write, mut read) = websocket.split();
 
+                    // respond to arriving websocket messages
                     wasm_bindgen_futures::spawn_local(async move {
                         while let Some(msg) = read.next().await {
                             if let Err(err) = (|| -> Result<_, _> {
-                                let Message::Text(raw_message) =
+                                let gloo_net::websocket::Message::Text(raw_message) =
                                     msg.map_err(|e| format!("Websocket error: {e}"))?
                                 else {
                                     return Err("Unexpected websocket binary data".to_string());
@@ -436,7 +532,7 @@ mod session {
                         </div>
                         <div class="chats-list">
                             {
-                                self.chats.iter().map(|chat| {
+                                self.chat_list.iter().map(|chat| {
                                     let onclick = {
                                         // yes, i know what you're thinking, but both clones are necessary
                                         // the first is so that the callback closure has its own copy
@@ -446,7 +542,7 @@ mod session {
                                         ctx.link().callback(move |_| Msg::SelectChat(chat.clone()))
                                     };
                                     html! {
-                                        <div class="chat" {onclick}><p>{&chat.borrow().name}</p></div>
+                                        <div class="chat" {onclick}><p>{&chat.borrow().name()}</p></div>
                                     }
                                 }).collect::<Vec<_>>()
                             }
@@ -482,17 +578,40 @@ mod session {
                         <div class="chat-messages">
                             {
                                 if let Some(chat) = &self.current_chat {
-                                    chat.borrow().messages.iter().map(|message| {
-                                        let author = match message.author {
-                                            Author::User => "user",
-                                            Author::Assistant => "assistant"
-                                        };
-                                        html! {
-                                            <div class={classes!("message-row", author)}>
-                                                <div class="message">{&message.content}</div>
-                                            </div>
+                                    match &*chat.borrow() {
+                                        Chat::Skeleton { message } => {
+                                            vec![
+                                                html! {
+                                                    <div class={classes!("message-row", "user")}>
+                                                        <div class="message">{&message}</div>
+                                                    </div>
+                                                }
+                                            ]
                                         }
-                                    }).collect()
+                                        Chat::Real { message_list, .. } => {
+                                            message_list.iter().map(|message| {
+                                                match &*message.borrow() {
+                                                    Message::Skeleton { content } => html! {
+                                                        <div class={classes!("message-row", "user")}>
+                                                            <div class="message">{&content}</div>
+                                                        </div>
+                                                    },
+                                                    Message::Real(message) => {
+                                                        let author = match message.author {
+                                                            AuthorType::User => "user",
+                                                            AuthorType::AssistantResponding
+                                                            | AuthorType::AssistantFinished => "assistant"
+                                                        };
+                                                        html! {
+                                                            <div class={classes!("message-row", author)}>
+                                                                <div class="message">{&message.content}</div>
+                                                            </div>
+                                                        }
+                                                    },
+                                                }
+                                            }).collect::<Vec<_>>()
+                                        },
+                                    }
                                 } else {
                                     Vec::new()
                                 }

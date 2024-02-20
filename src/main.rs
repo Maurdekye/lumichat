@@ -370,7 +370,7 @@ async fn submit_chat_message(
     user: UserId,
     chat: ChatId,
     content: &str,
-) -> MessageId {
+) -> (Message, Message) {
     // put new message into database
     let now = Utc::now().naive_utc();
     let new_message = NewMessage {
@@ -379,7 +379,7 @@ async fn submit_chat_message(
         content,
         created: now,
     };
-    let _: Message = insert_into(messages_dsl::messages)
+    let user_message: Message = insert_into(messages_dsl::messages)
         .values(&new_message)
         .get_result(db)
         .expect("Error inserting message into new chat");
@@ -399,7 +399,7 @@ async fn submit_chat_message(
     // TODO: code here to spawn a new thread to query the llm api and start sending message packets back
     let _user = user; // spawn a new task here
 
-    assistant_message.id
+    (user_message, assistant_message)
 }
 
 #[post("/new-chat")]
@@ -416,24 +416,25 @@ async fn new_chat_handler(
     let user_id = identity.user_id().expect("Failed to get user id");
     let mut db = db.get().expect("Database not available");
     let now = Utc::now().naive_utc();
-    let new_chat = NewChat {
+    let chat = NewChat {
         name: "New Chat",
         owner: user_id,
         created: now.clone(),
     };
-    let new_chat: Chat = insert_into(chats_dsl::chats)
-        .values(&new_chat)
+    let chat: Chat = insert_into(chats_dsl::chats)
+        .values(&chat)
         .get_result(&mut db)
         .expect("Error insterting new chat");
 
     // place new chat message in database
-    let assistant_message =
-        submit_chat_message(&mut db, user_id, new_chat.id, &body.initial_message).await;
+    let (user_message, assistant_response) =
+        submit_chat_message(&mut db, user_id, chat.id, &body.initial_message).await;
 
     // send chat id and assistant message id back
     Okay(new_chat::Response {
-        chat: new_chat.id,
-        assistant_message,
+        chat,
+        user_message,
+        assistant_response,
     })
 }
 
@@ -499,10 +500,14 @@ async fn chat_message_handler(
     };
 
     // place new chat message in database
-    let assistant_message = submit_chat_message(&mut db, chat.owner, body.chat, &body.message).await;
+    let (user_message, assistant_response) =
+        submit_chat_message(&mut db, chat.owner, body.chat, &body.message).await;
 
-    // send assistant message id back
-    Okay(chat_message::Response::Success { assistant_message })
+    // send newly created messages back
+    Okay(chat_message::Response::Success {
+        user_message,
+        assistant_response,
+    })
 }
 
 #[get("/list-chats")]
