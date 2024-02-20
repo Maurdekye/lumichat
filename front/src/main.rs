@@ -235,6 +235,14 @@ mod login {
                                     let input: HtmlInputElement = e.target_unchecked_into();
                                     Msg::UpdatePassword(input.value())
                                 })}
+                                onkeypress={
+                                    ctx.link().batch_callback(move |e: KeyboardEvent| {
+                                    if e.key() == "Enter" {
+                                        e.prevent_default();
+                                        return Some(Msg::Request)
+                                    }
+                                    None
+                                })}
                             />
                             <button onclick={ctx.link().callback(|_| Msg::Request)}>{"Login"}</button>
                         </div>
