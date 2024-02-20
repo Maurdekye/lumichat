@@ -1,4 +1,4 @@
-CREATE TYPE author_type AS ENUM ('User', 'AssistantResponding', 'AssistantFinished');
+CREATE TYPE author_type AS ENUM ('user', 'assistant_responding', 'assistant_finished');
 
 CREATE TABLE Messages (
     id SERIAL PRIMARY KEY,

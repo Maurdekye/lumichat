@@ -404,8 +404,9 @@ async fn submit_chat_message(
     {
         let assistant_message = assistant_message.clone();
         actix::spawn(async move {
-            time::interval(Duration::from_secs(2)).tick().await;
-            let mut interval = time::interval(Duration::from_millis(200));
+            let mut initial_interval = time::interval(Duration::from_millis(5000));
+            initial_interval.tick().await;
+            let mut interval = time::interval(Duration::from_millis(20));
             let message = assistant_message.id;
             let mock_text = "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.";
             
@@ -616,7 +617,7 @@ async fn check_chat_handler(
 
 get_chat_error_into!(list_messages::FailureReason);
 
-#[get("/list-messages")]
+#[post("/list-messages")]
 async fn list_messages_handler(
     identity: Identity,
     body: Json<list_messages::Request>,

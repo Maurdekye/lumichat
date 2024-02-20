@@ -263,7 +263,7 @@ mod login {
 }
 
 mod session {
-    use std::{cell::RefCell, collections::HashMap, rc::Rc};
+    use std::{cell::RefCell, collections::HashMap, fmt::Debug, rc::Rc};
 
     use futures::stream::SplitSink;
     use futures::StreamExt;
@@ -283,16 +283,28 @@ mod session {
 
     type WebsocketWriter = SplitSink<WebSocket, gloo_net::websocket::Message>;
 
+    #[derive(Debug)]
     pub enum MessageContent {
         Skeleton { content: String },
         Real(model::Message),
     }
 
+    #[derive(Debug)]
     pub struct Message {
         key: ElemKey,
         inner: MessageContent,
     }
 
+    impl Default for BufferedMessage {
+        fn default() -> Self {
+            Self {
+                content: Default::default(),
+                progress: AuthorType::AssistantResponding,
+            }
+        }
+    }
+
+    #[derive(Debug)]
     pub struct LoadedChatMessages {
         message_list: Vec<Rc<RefCell<Message>>>,
         message_index: HashMap<MessageId, Rc<RefCell<Message>>>,
@@ -321,17 +333,20 @@ mod session {
         }
     }
 
+    #[derive(Debug)]
     pub enum ChatMessages {
         Unloaded,
         Loading,
         Loaded(LoadedChatMessages),
     }
 
+    #[derive(Debug)]
     pub struct RealChat {
         chat: model::Chat,
         messages: ChatMessages,
     }
 
+    #[derive(Debug)]
     pub enum ChatContent {
         Skeleton {
             user_message: String,
@@ -340,6 +355,7 @@ mod session {
         Real(RealChat),
     }
 
+    #[derive(Debug)]
     pub struct Chat {
         key: ElemKey,
         inner: ChatContent,
@@ -374,9 +390,16 @@ mod session {
         }
     }
 
+    #[derive(Debug)]
+    pub struct BufferedMessage {
+        content: String,
+        progress: AuthorType,
+    }
+
     pub struct LoadedChats {
         chat_list: Vec<Rc<RefCell<Chat>>>,
         chat_index: HashMap<ChatId, Rc<RefCell<Chat>>>,
+        unknowns_buffer: HashMap<MessageId, BufferedMessage>,
     }
 
     impl LoadedChats {
@@ -384,6 +407,7 @@ mod session {
             Self {
                 chat_list: Vec::new(),
                 chat_index: HashMap::new(),
+                unknowns_buffer: HashMap::new(),
             }
         }
     }
@@ -438,6 +462,51 @@ mod session {
         WebsocketDisconnect,
     }
 
+    impl Debug for Msg {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::Logout => write!(f, "Logout"),
+                Self::ToggleSidebar => write!(f, "ToggleSidebar"),
+                Self::NewChat => write!(f, "NewChat"),
+                Self::SelectChat(arg0) => f.debug_tuple("SelectChat").field(arg0).finish(),
+                Self::UpdateMessage(arg0) => f.debug_tuple("UpdateMessage").field(arg0).finish(),
+                Self::SubmitMessage => write!(f, "SubmitMessage"),
+                Self::ChatMessageResponse {
+                    chat,
+                    response,
+                    user_message_key,
+                } => f
+                    .debug_struct("ChatMessageResponse")
+                    .field("chat", chat)
+                    .field("response", response)
+                    .field("user_message_key", user_message_key)
+                    .finish(),
+                Self::NewChatResponse {
+                    response,
+                    chat_key,
+                    user_message_key,
+                } => f
+                    .debug_struct("NewChatResponse")
+                    .field("response", response)
+                    .field("chat_key", chat_key)
+                    .field("user_message_key", user_message_key)
+                    .finish(),
+                Self::LoadChats => write!(f, "LoadChats"),
+                Self::LoadedChats(arg0) => f.debug_tuple("LoadedChats").field(arg0).finish(),
+                Self::LoadMessages(arg0) => f.debug_tuple("LoadMessages").field(arg0).finish(),
+                Self::LoadedMessages { chat, response } => f
+                    .debug_struct("LoadedMessages")
+                    .field("chat", chat)
+                    .field("response", response)
+                    .finish(),
+                Self::WebsocketTryConnect => write!(f, "WebsocketTryConnect"),
+                Self::WebsocketConnected(_) => f.debug_tuple("WebsocketConnected").finish(),
+                Self::WebsocketData(arg0) => f.debug_tuple("WebsocketData").field(arg0).finish(),
+                Self::WebsocketDisconnect => write!(f, "WebsocketDisconnect"),
+            }
+        }
+    }
+
     #[derive(Clone, PartialEq, Properties)]
     pub struct Props {
         pub user: User,
@@ -459,6 +528,7 @@ mod session {
         }
 
         fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
+            log!(format!("msg = {msg:#?}"));
             match msg {
                 Msg::Logout => {
                     let on_logout = ctx.props().on_logout.clone();
@@ -559,6 +629,11 @@ mod session {
                     response,
                     user_message_key,
                 } => {
+                    let Chats::Loaded(loaded_chats) = &mut self.chats else {
+                        error!("Recieved new chat message without chats being loaded");
+                        return false;
+                    };
+
                     let ChatContent::Real(real_chat) = &mut RefCell::borrow_mut(&chat).inner else {
                         error!("Recieved new chat message for skeleton chat?");
                         return false;
@@ -569,7 +644,7 @@ mod session {
                         return false;
                     };
 
-                    let (user_message, assistant_response) = match response {
+                    let (user_message, mut assistant_response) = match response {
                         chat_message::Response::Failure(reason) => {
                             error!("Chat message failure:", format!("{reason:?}"));
                             return false;
@@ -581,6 +656,16 @@ mod session {
                     };
 
                     loaded_messages.push_message_with_key(user_message, user_message_key);
+
+                    // load buffered tokens that might have been missed
+                    if let Some(buffered_message) =
+                        loaded_chats.unknowns_buffer.remove(&assistant_response.id)
+                    {
+                        assistant_response
+                            .content
+                            .push_str(&buffered_message.content);
+                        assistant_response.author = buffered_message.progress;
+                    }
                     loaded_messages.push_message(assistant_response);
 
                     loaded_messages
@@ -600,7 +685,18 @@ mod session {
                     let chat_id = chat.id;
                     let mut loaded_messages = LoadedChatMessages::new();
                     loaded_messages.push_message_with_key(response.user_message, user_message_key);
-                    loaded_messages.push_message(response.assistant_response);
+                    let mut assistant_response = response.assistant_response;
+
+                    // load buffered tokens that might have been missed
+                    if let Some(buffered_message) =
+                        loaded_chats.unknowns_buffer.remove(&assistant_response.id)
+                    {
+                        assistant_response
+                            .content
+                            .push_str(&buffered_message.content);
+                        assistant_response.author = buffered_message.progress;
+                    }
+                    loaded_messages.push_message(assistant_response);
                     let real_chat = RealChat {
                         chat,
                         messages: ChatMessages::Loaded(loaded_messages),
@@ -657,7 +753,7 @@ mod session {
                         real_chat.chat.id
                     };
                     ctx.link().send_future(async move {
-                        let response: list_messages::Response = json!(get!(
+                        let response: list_messages::Response = json!(post!(
                             "/list-messages",
                             list_messages::Request { chat: chat_id }
                         ));
@@ -751,6 +847,24 @@ mod session {
                             message: message_id,
                             content,
                         } => {
+                            fn buffer_message(
+                                buffer: &mut HashMap<MessageId, BufferedMessage>,
+                                message_id: MessageId,
+                                content: websocket::chat::Message,
+                            ) {
+                                let buffered_message = buffer.entry(message_id).or_default();
+
+                                // append tokens to buffer or finalize buffered message
+                                match content {
+                                    websocket::chat::Message::Token(token) => {
+                                        buffered_message.content.push_str(&token)
+                                    }
+                                    websocket::chat::Message::Finish => {
+                                        buffered_message.progress = AuthorType::AssistantFinished
+                                    }
+                                }
+                            }
+
                             // retrieve inner message referred to in websocket message
                             let Chats::Loaded(loaded_chats) = &mut self.chats else {
                                 error!("Received chat update websocket message before chats have loaded");
@@ -758,23 +872,35 @@ mod session {
                             };
 
                             let Some(chat) = loaded_chats.chat_index.get(&chat_id) else {
-                                error!("Unknown chat id", chat_id);
+                                // chat has not yet been recieved, buffer the in progress message
+                                buffer_message(
+                                    &mut loaded_chats.unknowns_buffer,
+                                    message_id,
+                                    content,
+                                );
                                 return false;
                             };
 
-                            let ChatContent::Real(real_chat) = &RefCell::borrow(chat).inner else {
+                            let ChatContent::Real(real_chat) = &mut RefCell::borrow_mut(chat).inner
+                            else {
                                 error!("Recieved message for skeleton chat", chat_id);
                                 return false;
                             };
 
-                            let ChatMessages::Loaded(loaded_messages) = &real_chat.messages else {
+                            let ChatMessages::Loaded(loaded_messages) = &mut real_chat.messages
+                            else {
                                 error!("Recieved message for unloaded chat", chat_id);
                                 return false;
                             };
 
                             let Some(message) = loaded_messages.message_index.get(&message_id)
                             else {
-                                error!("Unknown message id", message_id, "for chat", chat_id);
+                                // message has not yet been recieved, buffer the in progress message
+                                buffer_message(
+                                    &mut loaded_chats.unknowns_buffer,
+                                    message_id,
+                                    content,
+                                );
                                 return false;
                             };
 
