@@ -100,16 +100,9 @@ struct Config {
     admin_signup: bool,
 }
 
+#[derive(Default)]
 struct StateInner {
     websock_connections: HashMap<UserId, Vec<Addr<Websocket>>>,
-}
-
-impl Default for StateInner {
-    fn default() -> Self {
-        Self {
-            websock_connections: Default::default(),
-        }
-    }
 }
 
 impl StateInner {
@@ -171,6 +164,8 @@ impl FullUserFromIdentity for Option<Identity> {
 }
 
 // Websocket management
+
+// TODO: accept periodic pings & close dead connections that dont send them
 
 #[get("/ws")]
 async fn ws_handler(
@@ -370,79 +365,6 @@ struct NewMessage<'a> {
     created: NaiveDateTime,
 }
 
-#[post("/new-chat")]
-async fn new_chat_handler(
-    identity: Identity,
-    db: Data<Database>,
-    body: Json<new_chat::Request>,
-) -> Response<new_chat::Response> {
-    // decode request
-    let body = body.into_inner();
-    println!("/new-chat: {body:#?}");
-
-    // put new chat into database
-    let user_id = identity.user_id().expect("Failed to get user id");
-    let mut db = db.get().expect("Database not available");
-    let now = Utc::now().naive_utc();
-    let new_chat = NewChat {
-        name: "New Chat",
-        owner: user_id,
-        created: now.clone(),
-    };
-    let new_chat: Chat = insert_into(chats_dsl::chats)
-        .values(&new_chat)
-        .get_result(&mut db)
-        .expect("Error insterting new chat");
-
-    // place new chat message in database
-    let assistant_message =
-        submit_chat_message(&mut db, user_id, new_chat.id, &body.initial_message).await;
-
-    // send chat id and assistant message id back
-    Okay(new_chat::Response {
-        chat: new_chat.id,
-        assistant_message,
-    })
-}
-
-#[post("/chat-message")]
-async fn chat_message_handler(
-    identity: Identity,
-    db: Data<Database>,
-    body: Json<chat_message::Request>,
-) -> Response<chat_message::Response> {
-    // decode request
-    let body = body.into_inner();
-    println!("/chat-message: {body:#?}");
-
-    // check database that chat exists
-    let mut db = db.get().expect("Database not available");
-    let Some(associated_chat): Option<Chat> = chats_dsl::chats
-        .find(body.chat)
-        .first(&mut db)
-        .optional()
-        .expect("Error querying database")
-    else {
-        return BadRequest(chat_message::Response::Failure(
-            chat_message::FailureReason::ChatDoesNotExist,
-        ));
-    };
-
-    // confirm that user owns the given chat
-    let user_id = identity.user_id().expect("Failed to get user id");
-    if associated_chat.owner != user_id {
-        return BadRequest(chat_message::Response::Failure(
-            chat_message::FailureReason::ChatNotOwnedByUser,
-        ));
-    }
-
-    // place new chat message in database
-    let assistant_message = submit_chat_message(&mut db, user_id, body.chat, &body.message).await;
-
-    // send assistant message id back
-    Okay(chat_message::Response::Success { assistant_message })
-}
-
 async fn submit_chat_message(
     db: &mut DatabaseConnection,
     user: UserId,
@@ -480,19 +402,39 @@ async fn submit_chat_message(
     assistant_message.id
 }
 
-#[get("/list-chats")]
-async fn list_chats_handler(identity: Identity, db: Data<Database>) -> impl Responder {
-    println!("/list-chats");
+#[post("/new-chat")]
+async fn new_chat_handler(
+    identity: Identity,
+    db: Data<Database>,
+    body: Json<new_chat::Request>,
+) -> Response<new_chat::Response> {
+    // decode request
+    let body = body.into_inner();
+    println!("/new-chat: {body:#?}");
 
-    // get chats owned by user
+    // put new chat into database
     let user_id = identity.user_id().expect("Failed to get user id");
     let mut db = db.get().expect("Database not available");
-    let chats: Vec<Chat> = chats_dsl::chats
-        .filter(chats_dsl::owner.eq(user_id))
-        .load(&mut db)
-        .expect("Error querying database");
+    let now = Utc::now().naive_utc();
+    let new_chat = NewChat {
+        name: "New Chat",
+        owner: user_id,
+        created: now.clone(),
+    };
+    let new_chat: Chat = insert_into(chats_dsl::chats)
+        .values(&new_chat)
+        .get_result(&mut db)
+        .expect("Error insterting new chat");
 
-    HttpResponse::Ok().json(list_chats::Response { chats })
+    // place new chat message in database
+    let assistant_message =
+        submit_chat_message(&mut db, user_id, new_chat.id, &body.initial_message).await;
+
+    // send chat id and assistant message id back
+    Okay(new_chat::Response {
+        chat: new_chat.id,
+        assistant_message,
+    })
 }
 
 enum GetChatError {
@@ -535,6 +477,47 @@ fn get_chat_by_user(
     }
 
     Ok(chat)
+}
+
+get_chat_error_into!(chat_message::FailureReason);
+
+#[post("/chat-message")]
+async fn chat_message_handler(
+    identity: Identity,
+    db: Data<Database>,
+    body: Json<chat_message::Request>,
+) -> Response<chat_message::Response> {
+    // decode request
+    let body = body.into_inner();
+    println!("/chat-message: {body:#?}");
+
+    // check database that chat exists
+    let mut db = db.get().expect("Database not available");
+    let chat = match get_chat_by_user(identity, body.chat, &mut db) {
+        Ok(chat) => chat,
+        Err(err) => return BadRequest(chat_message::Response::Failure(err.into())),
+    };
+
+    // place new chat message in database
+    let assistant_message = submit_chat_message(&mut db, chat.owner, body.chat, &body.message).await;
+
+    // send assistant message id back
+    Okay(chat_message::Response::Success { assistant_message })
+}
+
+#[get("/list-chats")]
+async fn list_chats_handler(identity: Identity, db: Data<Database>) -> impl Responder {
+    println!("/list-chats");
+
+    // get chats owned by user
+    let user_id = identity.user_id().expect("Failed to get user id");
+    let mut db = db.get().expect("Database not available");
+    let chats: Vec<Chat> = chats_dsl::chats
+        .filter(chats_dsl::owner.eq(user_id))
+        .load(&mut db)
+        .expect("Error querying database");
+
+    HttpResponse::Ok().json(list_chats::Response { chats })
 }
 
 get_chat_error_into!(check_chat::FailureReason);
