@@ -35,7 +35,7 @@ export $(cat .env | xargs)
 
 # Build the frontend
 cd front
-trunk build
+trunk build --release # i've had issues building it on debug, so for now, just build with `--release`
 cd ..
 
 # Build & run the backend
