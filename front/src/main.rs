@@ -974,7 +974,7 @@ mod session {
 
             html! {
                 <div class="session">
-                    <div class={if self.sidebar { "sidebar" } else { "sidebar collapsed" }}>
+                    <div class={classes!("sidebar", (!self.sidebar).then_some("collapsed"))}>
                         <div class="new-chat">
                             <button onclick={ctx.link().callback(|_| Msg::NewChat)}>{" + New Chat"}</button>
                         </div>
@@ -994,10 +994,11 @@ mod session {
                                             let chat = chat.clone();
                                             ctx.link().callback(move |_| Msg::SelectChat(chat.clone()))
                                         };
+                                        let selected = self.current_chat.as_ref().is_some_and(|current| Rc::ptr_eq(chat, &current));
                                         let chat = RefCell::borrow(chat);
                                         let key = chat.key;
                                         html! {
-                                            <div class="chat" {key} {onclick}>{&chat.name()}</div>
+                                            <div class={classes!("chat", selected.then_some("selected"))}{key} {onclick}>{&chat.name()}</div>
                                         }
                                     }).collect::<Html>(),
                                 }
