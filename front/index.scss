@@ -1,9 +1,11 @@
-$primary: rgb(0, 0, 0);
-$secondary: rgb(29, 29, 29);
-$tertiary: rgb(64, 64, 64);
-$input: rgb(156, 156, 156);
-$trim: rgb(196, 196, 196);
-$text: $trim;
+$primary: rgb(42, 42, 42);
+$secondary: rgb(49, 49, 49);
+$tertiary: rgb(87, 87, 87);
+$trim: rgb(79, 78, 78);
+$trim-light: rgb(157, 157, 157);
+
+$text: rgb(196, 196, 196);
+$interact: rgb(62, 62, 62);
 
 $success: rgb(35, 68, 34);
 $progress: rgb(48, 59, 69);
@@ -12,6 +14,33 @@ $error: rgb(48, 32, 24);
 * {
   min-width: 0;
   color: $text;
+  font-family: "Open Sans", sans-serif;
+  font-weight: 500;
+}
+
+.scrollable {
+  overflow-y: hidden;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+  
+  &:hover {
+    overflow-y: auto;
+  }
+}
+
+::-webkit-scrollbar {
+  width: 0.6em;
+  position: relative;
+}
+
+::-webkit-scrollbar-track {
+  background: none;
+  padding: 0.35em;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba($color: $tertiary, $alpha: 0.75);
+  border-radius: 0.2em;
 }
 
 html, body {
@@ -42,19 +71,39 @@ html, body {
     flex-direction: column;
     justify-content: center;
     align-items: center;
-    width: min(13em, 90vw);
-    height: min(16em, 90vw);
-    background-color: $secondary;
+    padding: 1em;
     border: 1px solid $trim;
     border-radius: 0.5em;
   
     .login-form {
-      display: flex;
-      flex-flow: column;
-      align-items: center;
+      display: grid;
+      gap: 0.5em;
     
       * {
         margin: 0.3em;
+      }
+  
+      label {
+        grid-column: 1;
+      }
+
+      #identifier, #password {
+        grid-column: 2;
+      }
+
+      label[for=identifier], #identifier {
+        grid-row: 1;
+      }
+
+      label[for=password], #password {
+        grid-row: 2;
+      }
+
+      .login-button {
+        grid-column: 1 / 3;
+        grid-row: 3;
+        justify-self: center;
+        margin-top: 1em;
       }
     }
 
@@ -89,9 +138,9 @@ html, body {
 
   .sidebar {
     display: flex;
-    flex-flow: column-reverse;
+    flex-flow: column;
     width: 14em;
-    border: 1px solid $tertiary;
+    background-color: $secondary;
     overflow-x: hidden;
 
     transition: width 0.6s, border-width 0.6s;
@@ -101,93 +150,167 @@ html, body {
       border-width: 0;
     }
 
-    .profile {
+    .new-chat {
       display: flex;
-      height: 4em;
-      align-items: center;
-      justify-content: center;
-      border: 1px solid $tertiary;
+      height: 3em;
+
+      button {
+        flex: 1;
+        width: 100%;
+        height: 100%;
+        border: none;
+        padding: 0;
+      }
     }
 
     .chats-list {
       flex: 1;
       display: flex;
       flex-flow: column;
-      overflow-y: auto;
       max-height: 100%;
 
-      .chat, .new-chat {
+      .chat {
         height: 3em;
         align-items: center;
-  
+        margin: 0.8em 0.2em 0 0.6em;
+        padding: 0.6em;
+        border-radius: 0.7em;
+        box-shadow: 0em 0em 1em 0.1em rgba($color: #000000, $alpha: 0.1);
         border: 1px solid $tertiary;
-  
-        * {
-          margin: 1em;
-        }
-      }
-    }
-  }
+        cursor: pointer;
 
-  .sidebar-toggle {
-    width: 2em;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .chat-window {
-    flex: 1;
-    display: flex;
-    flex-flow: column-reverse;
-    overflow: hidden;
-
-    .chat-messages {
-      flex: 1;
-      display: flex;
-      flex-flow: column;
-      overflow-y: auto;
-      padding: 0.5em;
-      max-height: 100%;
-
-      .message-row {
-        margin: 0.8em;
-        display: flex;
-
-        &.user {
-          flex-flow: row-reverse;
-        }
-
-        &.assistant {
-          flex-flow: row;
-        }
-
-        .message {
-          max-width: 80%;
+        &.selected {
+          background-color: $interact;
         }
       }
     }
 
-    .chat-input-container {
+    .profile {
       display: flex;
-      height: 7em;
-
-      justify-content: center;
+      height: 4em;
       align-items: center;
+      justify-content: center;
+    }
+  }
 
-      .chat-input {
-        width: 80%;
+  .chat-and-sidebar-toggle {
+    width: 100%;
+    height: 100%;
+    position: relative;
+
+    .sidebar-toggle {
+      width: 2em;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: absolute;
+      z-index: 10;
+  
+      button {
+        padding: 0.3em;
+        border: none;
+  
+        &:hover, &:active {
+          background-color: none;
+        }
+      }
+    }
+  
+    .chat-window {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      flex-flow: column-reverse;
+      overflow: hidden;
+      position: absolute;
+  
+      .chat-messages {
+        flex: 1;
+        display: flex;
+        flex-flow: column;
+        padding: 0.5em;
+        max-height: 100%;
+        align-items: center;
+  
+        .message-row {
+          margin: 1.2em;
+          margin-bottom: 0;
+          display: block;
+          flex-flow: row;
+          width: min(60em, calc(100% - 0.6em));
+          
+          .message-author {
+            font-weight: 700;
+            font-size: 18px;
+          }
+  
+          &:first-child {
+            margin-top: 3em;
+          }
+        }
+      }
+  
+      .chat-input-container {
+        display: flex;
+        min-height: 5em;
+        justify-content: center;
+        align-items: center;
+        padding: 2em 0;
+  
+        .chat-input {
+          width: 80%;
+          padding: 0.8em;
+        }
+      }
+
+      .main-page {
+        width: 100%;
+        height: 100%;
+        display: flex;
+        flex-flow: column;
+        align-items: center;
+        justify-content: center;
+
+        * {
+          margin: 1.2em;
+        }
+
+        .logo {
+          width: 10em;
+          height: 10em;
+        }
       }
     }
   }
 }
  
 button {
-  background-color: $tertiary;
+  background-color: rgba($color: #000000, $alpha: 0);
   border-radius: 0.1em;
+  border: 1px solid $trim;
+  font-size: 0.9em;
+  padding: 0.35em 2em 0.35em 2em;
+  cursor: pointer;
+
+  transition-duration: 0.05s;
+
+  &:hover {
+    background-color: $secondary;
+  }
+
+  &:active {
+    background-color: $interact;
+  }
 }
 
-input {
-  background-color: $input;
-  color: black;
+input, textarea {
+  background-color: $primary !important;
+  border: 1px solid $trim;
+  border-radius: 0.35em;
+  resize: none;
+
+  &:focus {
+    border-color: $trim-light;
+  }
 }

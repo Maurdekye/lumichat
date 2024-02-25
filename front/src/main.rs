@@ -244,7 +244,7 @@ mod login {
                                     None
                                 })}
                             />
-                            <button onclick={ctx.link().callback(|_| Msg::Request)}>{"Login"}</button>
+                            <button class="login-button" onclick={ctx.link().callback(|_| Msg::Request)}>{"Login"}</button>
                         </div>
                         {
                             match &self.message {
@@ -271,7 +271,7 @@ mod login {
 }
 
 mod session {
-    use std::{cell::RefCell, collections::HashMap, fmt::Debug, rc::Rc};
+    use std::{cell::RefCell, collections::HashMap, fmt::Debug, mem, rc::Rc};
 
     use futures::stream::SplitSink;
     use futures::StreamExt;
@@ -555,7 +555,7 @@ mod session {
                     self.message_input = message;
                 }
                 Msg::SubmitMessage => {
-                    let content = self.message_input.clone();
+                    let content = mem::replace(&mut self.message_input, String::new());
                     match &self.current_chat {
                         Some(chat) => {
                             let user_message_key: ElemKey = rand::random();
@@ -630,7 +630,6 @@ mod session {
                             });
                         }
                     }
-                    self.message_input = String::new();
                 }
                 Msg::ChatMessageResponse {
                     chat,
@@ -922,10 +921,10 @@ mod session {
                             // append tokens or finalize message
                             match content {
                                 websocket::chat::Message::Token(token) => {
-                                    message.content.push_str(&token)
+                                    message.content.push_str(&token);
                                 }
                                 websocket::chat::Message::Finish => {
-                                    message.author = AuthorType::AssistantFinished
+                                    message.author = AuthorType::AssistantFinished;
                                 }
                             }
                         }
@@ -963,6 +962,7 @@ mod session {
             // render page
             struct MessageDisplay<'a> {
                 author: &'a str,
+                author_name: String,
                 content: String,
                 key: ElemKey,
             }
@@ -975,17 +975,17 @@ mod session {
             html! {
                 <div class="session">
                     <div class={if self.sidebar { "sidebar" } else { "sidebar collapsed" }}>
-                        <div class="profile">
-                            <button onclick={ctx.link().callback(|_| Msg::Logout)}>{"Logout"}</button>
+                        <div class="new-chat">
+                            <button onclick={ctx.link().callback(|_| Msg::NewChat)}>{" + New Chat"}</button>
                         </div>
-                        <div class="chats-list">
+                        <div class="chats-list scrollable">
                             {
                                 match &self.chats {
                                     Chats::Loading | Chats::Unloaded => html! {
-                                        <div class="loading-chats">{"Loading chats..."}</div>
+                                        <div class="loading-chats"></div>
                                     },
                                     Chats::Loaded(loaded_chats) =>
-                                    loaded_chats.chat_list.iter().map(|chat| {
+                                    loaded_chats.chat_list.iter().rev().map(|chat| {
                                         let onclick = {
                                             // yes, i know what you're thinking, but both clones are necessary
                                             // the first is so that the callback closure has its own copy
@@ -997,42 +997,43 @@ mod session {
                                         let chat = RefCell::borrow(chat);
                                         let key = chat.key;
                                         html! {
-                                            <div class="chat" {key} {onclick}><p>{&chat.name()}</p></div>
+                                            <div class="chat" {key} {onclick}>{&chat.name()}</div>
                                         }
                                     }).collect::<Html>(),
                                 }
                             }
-                            <div class="new-chat">
-                                <button onclick={ctx.link().callback(|_| Msg::NewChat)}>{" + New Chat"}</button>
-                            </div>
+                        </div>
+                        <div class="profile">
+                            <button onclick={ctx.link().callback(|_| Msg::Logout)}>{"Logout"}</button>
                         </div>
                     </div>
-                    <div class="sidebar-toggle">
-                        <button onclick={ctx.link().callback(|_| Msg::ToggleSidebar)}>{if self.sidebar { "<" } else { ">" }}</button>
-                    </div>
-                    <div class="chat-window">
-                        <div class="chat-input-container">
-                            <input class="chat-input"
-                                disabled={self.current_chat.as_ref().is_some_and(|c| !RefCell::borrow(c).is_available())}
-                                oninput={ctx.link().callback(|e: InputEvent| {
-                                    let input: HtmlInputElement = e.target_unchecked_into();
-                                    Msg::UpdateMessage(input.value())
-                                })}
-                                onkeypress={
-                                    let message_input = self.message_input.clone();
-                                    ctx.link().batch_callback(move |e: KeyboardEvent| {
-                                    if e.key() == "Enter" {
-                                        e.prevent_default();
-                                        if !message_input.is_empty() {
-                                            return Some(Msg::SubmitMessage)
+                    <div class="chat-and-sidebar-toggle">
+                        <div class="sidebar-toggle">
+                            <button onclick={ctx.link().callback(|_| Msg::ToggleSidebar)}>{if self.sidebar { "<" } else { ">" }}</button>
+                        </div>
+                        <div class="chat-window">
+                            <div class="chat-input-container">
+                                <textarea class="chat-input"
+                                    rows={(self.message_input.chars().filter(|c| *c == '\n').count() + 1).min(24).to_string()}
+                                    disabled={self.current_chat.as_ref().is_some_and(|c| !RefCell::borrow(c).is_available())}
+                                    oninput={ctx.link().callback(|e: InputEvent| {
+                                        let input: HtmlInputElement = e.target_unchecked_into();
+                                        Msg::UpdateMessage(input.value())
+                                    })}
+                                    onkeypress={
+                                        let message_input = self.message_input.clone();
+                                        ctx.link().batch_callback(move |e: KeyboardEvent| {
+                                        if e.key() == "Enter" && !e.shift_key() {
+                                            e.prevent_default();
+                                            if !message_input.is_empty() {
+                                                return Some(Msg::SubmitMessage)
+                                            }
                                         }
-                                    }
-                                    None
-                                })}
-                                value={self.message_input.clone()}
-                            />
-                        </div>
-                        <div class="chat-messages">
+                                        None
+                                    })}
+                                    value={self.message_input.clone()}
+                                ></textarea>
+                            </div>
                             {
                                 if let Some(chat) = &self.current_chat {
                                     let chat = RefCell::borrow(chat);
@@ -1041,6 +1042,7 @@ mod session {
                                             MessagesDisplay::Loaded(vec![
                                                 MessageDisplay {
                                                     author: "user",
+                                                    author_name: ctx.props().user.username.clone(),
                                                     content: user_message.clone(),
                                                     key: *user_message_key,
                                                 }
@@ -1056,17 +1058,19 @@ mod session {
                                                         match &message.inner {
                                                             MessageContent::Skeleton { content } => MessageDisplay {
                                                                 author: "user",
+                                                                author_name: ctx.props().user.username.clone(),
                                                                 content: content.clone(),
                                                                 key,
                                                             },
                                                             MessageContent::Real(message) => {
-                                                                let author = match message.author {
-                                                                    AuthorType::User => "user",
+                                                                let (author, author_name) = match message.author {
+                                                                    AuthorType::User => ("user", ctx.props().user.username.clone()),
                                                                     AuthorType::AssistantResponding
-                                                                    | AuthorType::AssistantFinished => "assistant"
+                                                                    | AuthorType::AssistantFinished => ("assistant", "Assistant".to_string())
                                                                 };
                                                                 MessageDisplay {
                                                                     author,
+                                                                    author_name,
                                                                     content: message.content.clone(),
                                                                     key,
                                                                 }
@@ -1076,18 +1080,30 @@ mod session {
                                             }
                                         },
                                     };
-                                    match messages {
-                                        MessagesDisplay::Loaded(messages) => messages.into_iter().map(|MessageDisplay { author, content, key }| html! {
-                                            <div {key} class={classes!("message-row", author)}>
-                                                <div class="message">{content}</div>
-                                            </div>
-                                        }).collect::<Html>(),
-                                        MessagesDisplay::Loading => html! {
-                                            <div class="loading-messages">{"Loading messages..."}</div>
-                                        },
+                                    html! {
+                                        <div key=1 class="chat-messages scrollable">
+                                            {
+                                                match messages {
+                                                    MessagesDisplay::Loaded(messages) => messages.into_iter().map(|MessageDisplay { author, author_name, content, key }| html! {
+                                                        <div {key} class={classes!("message-row", author)}>
+                                                            <div class="message-author">{author_name}</div>
+                                                            <div class="message">{content}</div>
+                                                        </div>
+                                                    }).collect::<Html>(),
+                                                    MessagesDisplay::Loading => html! {
+                                                        <div class="loading-messages"></div>
+                                                    },
+                                                }
+                                            }
+                                        </div>
                                     }
                                 } else {
-                                    html! { <></> }
+                                    html! {
+                                        <div key=1 class="main-page">
+                                            <img class="logo" src="./static/logo.svg"/>
+                                            <h2 class="by-line">{"How can I illuminate your day?"}</h2>
+                                        </div>
+                                    }
                                 }
                             }
                         </div>
@@ -1149,7 +1165,7 @@ impl Component for App {
                     match &self.identity_state {
                         IdentityState::Loading =>
                             html! {
-                                <div class={"loading"}>{"Loading..."}</div>
+                                <div class={"loading"}></div>
                             },
                         IdentityState::Anonymous => {
                             let on_login = ctx.link().callback(|user| Msg::SetIdentity(IdentityState::User(user)));
