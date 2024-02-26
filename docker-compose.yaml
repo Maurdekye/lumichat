@@ -28,10 +28,28 @@ services:
       PORT: 80
       DATABASE_URL: postgres://postgres:root@db:5432/postgres
       REDIS_URL: redis://redis:6379
+      LLM_API_URL: http://llm-api:11434
     depends_on:
       - db
       - redis
+      - llm-api
+    restart: always
+
+  llm-api:
+    image: ollama/ollama:0.1.27
+    ports:
+      - "11434:11434"
+    volumes:
+      - llm_data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+          - driver: nvidia
+            capabilities: [gpu]
+            count: all
     restart: always
 
 volumes:
   postgres_data:
+  llm_data:

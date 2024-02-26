@@ -3,5 +3,6 @@ CREATE TABLE Chats (
     name VARCHAR(255) NOT NULL,
     owner INT NOT NULL,
     created TIMESTAMP NOT NULL,
+    context INT[] NOT NULL DEFAULT '{}',
     FOREIGN KEY (owner) REFERENCES Users(id)
 );

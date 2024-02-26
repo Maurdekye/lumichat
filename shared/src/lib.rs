@@ -18,6 +18,14 @@ pub mod model {
         pub admin: bool,
     }
 
+    #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+    pub struct User {
+        pub id: UserId,
+        pub username: String,
+        pub email: String,
+        pub admin: bool,
+    }
+
     impl From<FullUser> for User {
         fn from(
             FullUser {
@@ -37,23 +45,43 @@ pub mod model {
         }
     }
 
-    #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-    pub struct User {
-        pub id: UserId,
-        pub username: String,
-        pub email: String,
-        pub admin: bool,
-    }
-
     pub type ChatId = i32;
 
     #[derive(Queryable, Identifiable, Serialize, Deserialize, Clone, Debug, PartialEq)]
     #[diesel(table_name = crate::schema::chats)]
+    pub struct FullChat {
+        pub id: ChatId,
+        pub name: String,
+        pub owner: UserId,
+        pub created: NaiveDateTime,
+        pub context: Vec<Option<i32>>,
+    }
+
+    #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
     pub struct Chat {
         pub id: ChatId,
         pub name: String,
         pub owner: UserId,
         pub created: NaiveDateTime,
+    }
+
+    impl From<FullChat> for Chat {
+        fn from(
+            FullChat {
+                id,
+                name,
+                owner,
+                created,
+                ..
+            }: FullChat,
+        ) -> Self {
+            Chat {
+                id,
+                name,
+                owner,
+                created,
+            }
+        }
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, SqlType, DbEnum)]
@@ -62,6 +90,7 @@ pub mod model {
         User,
         AssistantResponding,
         AssistantFinished,
+        AssistantError,
     }
 
     pub type MessageId = i32;
@@ -73,6 +102,7 @@ pub mod model {
         pub chat: ChatId,
         pub author: AuthorType,
         pub content: String,
+        pub error: Option<String>,
         pub created: NaiveDateTime,
     }
 }
@@ -262,6 +292,7 @@ pub mod websocket {
         #[derive(Serialize, Deserialize, Clone, Debug)]
         pub enum Message {
             Token(String),
+            Error(String),
             Finish,
         }
     }

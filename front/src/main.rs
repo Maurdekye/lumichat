@@ -303,15 +303,6 @@ mod session {
         inner: MessageContent,
     }
 
-    impl Default for BufferedMessage {
-        fn default() -> Self {
-            Self {
-                content: Default::default(),
-                progress: AuthorType::AssistantResponding,
-            }
-        }
-    }
-
     #[derive(Debug)]
     pub struct LoadedChatMessages {
         message_list: Vec<Rc<RefCell<Message>>>,
@@ -400,8 +391,17 @@ mod session {
 
     #[derive(Debug)]
     pub struct BufferedMessage {
-        content: String,
+        content: Result<String, String>,
         progress: AuthorType,
+    }
+
+    impl Default for BufferedMessage {
+        fn default() -> Self {
+            Self {
+                content: Ok(String::new()),
+                progress: AuthorType::AssistantResponding,
+            }
+        }
     }
 
     pub struct LoadedChats {
@@ -668,9 +668,10 @@ mod session {
                     if let Some(buffered_message) =
                         loaded_chats.unknowns_buffer.remove(&assistant_response.id)
                     {
-                        assistant_response
-                            .content
-                            .push_str(&buffered_message.content);
+                        match buffered_message.content {
+                            Ok(message) => assistant_response.content.push_str(&message),
+                            Err(error) => assistant_response.error = Some(error),
+                        }
                         assistant_response.author = buffered_message.progress;
                     }
                     loaded_messages.push_message(assistant_response);
@@ -698,9 +699,10 @@ mod session {
                     if let Some(buffered_message) =
                         loaded_chats.unknowns_buffer.remove(&assistant_response.id)
                     {
-                        assistant_response
-                            .content
-                            .push_str(&buffered_message.content);
+                        match buffered_message.content {
+                            Ok(message) => assistant_response.content.push_str(&message),
+                            Err(error) => assistant_response.error = Some(error),
+                        }
                         assistant_response.author = buffered_message.progress;
                     }
                     loaded_messages.push_message(assistant_response);
@@ -864,10 +866,17 @@ mod session {
                                 // append tokens to buffer or finalize buffered message
                                 match content {
                                     websocket::chat::Message::Token(token) => {
-                                        buffered_message.content.push_str(&token)
+                                        if let Ok(content) = &mut buffered_message.content {
+                                            content.push_str(&token);
+                                        }
                                     }
                                     websocket::chat::Message::Finish => {
-                                        buffered_message.progress = AuthorType::AssistantFinished
+                                        buffered_message.progress = AuthorType::AssistantFinished;
+                                    }
+                                    websocket::chat::Message::Error(error) => {
+                                        error!(&error);
+                                        buffered_message.progress = AuthorType::AssistantError;
+                                        buffered_message.content = Err(error);
                                     }
                                 }
                             }
@@ -926,6 +935,11 @@ mod session {
                                 websocket::chat::Message::Finish => {
                                     message.author = AuthorType::AssistantFinished;
                                 }
+                                websocket::chat::Message::Error(error) => {
+                                    error!(&error);
+                                    message.author = AuthorType::AssistantError;
+                                    message.error = Some(error);
+                                }
                             }
                         }
                     }
@@ -960,18 +974,6 @@ mod session {
             }
 
             // render page
-            struct MessageDisplay<'a> {
-                author: &'a str,
-                author_name: String,
-                content: String,
-                key: ElemKey,
-            }
-
-            enum MessagesDisplay<'a> {
-                Loaded(Vec<MessageDisplay<'a>>),
-                Loading,
-            }
-
             html! {
                 <div class="session">
                     <div class={classes!("sidebar", (!self.sidebar).then_some("collapsed"))}>
@@ -987,18 +989,14 @@ mod session {
                                     Chats::Loaded(loaded_chats) =>
                                     loaded_chats.chat_list.iter().rev().map(|chat| {
                                         let onclick = {
-                                            // yes, i know what you're thinking, but both clones are necessary
-                                            // the first is so that the callback closure has its own copy
-                                            // and the second is so that the closure can give out a unique copy
-                                            // each time it's called
                                             let chat = chat.clone();
                                             ctx.link().callback(move |_| Msg::SelectChat(chat.clone()))
                                         };
-                                        let selected = self.current_chat.as_ref().is_some_and(|current| Rc::ptr_eq(chat, &current));
+                                        let selected = self.current_chat.as_ref().is_some_and(|current| Rc::ptr_eq(chat, current));
                                         let chat = RefCell::borrow(chat);
                                         let key = chat.key;
                                         html! {
-                                            <div class={classes!("chat", selected.then_some("selected"))}{key} {onclick}>{&chat.name()}</div>
+                                            <div class={classes!("chat", selected.then_some("selected"))} {key} {onclick}>{&chat.name()}</div>
                                         }
                                     }).collect::<Html>(),
                                 }
@@ -1035,78 +1033,67 @@ mod session {
                                     value={self.message_input.clone()}
                                 ></textarea>
                             </div>
-                            {
+                            {{
+                                fn render_message(author: String, author_name: &str, content: &str, key: u64) -> Html {
+                                    html! {
+                                        <div {key} class={classes!("message-row", author)}>
+                                            <div class="message-author">{author_name}</div>
+                                            <div class="message">{content}</div>
+                                        </div>
+                                    }
+                                }
+
+                                fn render_error(author_name: &str, error: &str, key: u64) -> Html {
+                                    html! {
+                                        <div {key} class={classes!("message-row", "assistant", "error")}>
+                                            <div class="message-author error">{author_name}</div>
+                                            <div class="message error">{error}</div>
+                                        </div>
+                                    }
+                                }
+
                                 if let Some(chat) = &self.current_chat {
                                     let chat = RefCell::borrow(chat);
-                                    let messages: MessagesDisplay = match &chat.inner {
+                                    let messages: Html = match &chat.inner {
                                         ChatContent::Skeleton { user_message, user_message_key } => {
-                                            MessagesDisplay::Loaded(vec![
-                                                MessageDisplay {
-                                                    author: "user",
-                                                    author_name: ctx.props().user.username.clone(),
-                                                    content: user_message.clone(),
-                                                    key: *user_message_key,
-                                                }
-                                            ])
+                                            render_message("user".to_string(), &ctx.props().user.username, &user_message, *user_message_key)
                                         }
                                         ChatContent::Real(real_chat) => {
                                             match &real_chat.messages {
-                                                ChatMessages::Loading | ChatMessages::Unloaded => MessagesDisplay::Loading,
+                                                ChatMessages::Loading | ChatMessages::Unloaded => html! {
+                                                    <div class="loading-messages"></div>
+                                                },
                                                 ChatMessages::Loaded(loaded_messages) =>
-                                                    MessagesDisplay::Loaded(loaded_messages.message_list.iter().map(|message| {
+                                                    loaded_messages.message_list.iter().map(|message| {
                                                         let message = &*RefCell::borrow(message);
                                                         let key = message.key;
                                                         match &message.inner {
-                                                            MessageContent::Skeleton { content } => MessageDisplay {
-                                                                author: "user",
-                                                                author_name: ctx.props().user.username.clone(),
-                                                                content: content.clone(),
-                                                                key,
-                                                            },
+                                                            MessageContent::Skeleton { content } => render_message("user".to_string(), &ctx.props().user.username, &content, key),
                                                             MessageContent::Real(message) => {
-                                                                let (author, author_name) = match message.author {
-                                                                    AuthorType::User => ("user", ctx.props().user.username.clone()),
+                                                                match message.author {
+                                                                    AuthorType::User => render_message("user".to_string(), &*ctx.props().user.username, &message.content, key),
                                                                     AuthorType::AssistantResponding
-                                                                    | AuthorType::AssistantFinished => ("assistant", "Assistant".to_string())
-                                                                };
-                                                                MessageDisplay {
-                                                                    author,
-                                                                    author_name,
-                                                                    content: message.content.clone(),
-                                                                    key,
+                                                                    | AuthorType::AssistantFinished => render_message("assistant".to_string(), "Assistant", &message.content, key),
+                                                                    AuthorType::AssistantError => render_error("Assistant", &*message.error.as_ref().unwrap_or(&String::new()), key)
                                                                 }
                                                             },
                                                         }
-                                                    }).collect::<Vec<_>>()),
+                                                    }).collect::<Html>(),
                                             }
                                         },
                                     };
                                     html! {
-                                        <div key=1 class="chat-messages scrollable">
-                                            {
-                                                match messages {
-                                                    MessagesDisplay::Loaded(messages) => messages.into_iter().map(|MessageDisplay { author, author_name, content, key }| html! {
-                                                        <div {key} class={classes!("message-row", author)}>
-                                                            <div class="message-author">{author_name}</div>
-                                                            <div class="message">{content}</div>
-                                                        </div>
-                                                    }).collect::<Html>(),
-                                                    MessagesDisplay::Loading => html! {
-                                                        <div class="loading-messages"></div>
-                                                    },
-                                                }
-                                            }
-                                        </div>
+                                        <div class="chat-messages scrollable">{messages}</div>
                                     }
                                 } else {
                                     html! {
-                                        <div key=1 class="main-page">
+                                        <div class="main-page">
                                             <img class="logo" src="./static/logo.svg"/>
                                             <h2 class="by-line">{"How can I illuminate your day?"}</h2>
                                         </div>
                                     }
                                 }
-                            }
+                            }}
                         </div>
                     </div>
                 </div>

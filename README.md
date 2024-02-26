@@ -28,7 +28,7 @@ rustup target add wasm32-unknown-unknown
 ./setup_db.sh
 
 # Deploy auxiliary docker services
-docker compose up -d db redis
+docker compose up -d db redis llm-api
 
 # Set environment variables
 export $(cat .env | xargs)

@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::convert::identity;
 use std::default::Default;
 use std::env;
+use std::error::Error;
 use std::sync::{Arc, RwLock};
 
 use actix::{Actor, Addr, StreamHandler};
@@ -18,10 +20,11 @@ use diesel::prelude::*;
 use diesel::r2d2::{self, ConnectionManager};
 use diesel::Insertable;
 use diesel::{insert_into, update};
+use futures::stream::StreamExt;
+use reqwest::Client;
 
-use tokio::time::{self, Duration};
-
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::{Number, Value};
 use shared::{api::*, model::*, websocket};
 
 use shared::schema::{
@@ -100,6 +103,7 @@ impl actix::Handler<WebsocketMessage> for Websocket {
 #[derive(Clone)]
 struct Config {
     admin_signup: bool,
+    llm_api_url: String,
 }
 
 #[derive(Default)]
@@ -352,14 +356,6 @@ async fn logout_handler(user: Identity) -> impl Responder {
 // Chatting
 
 #[derive(Insertable)]
-#[diesel(table_name = shared::schema::chats)]
-struct NewChat<'a> {
-    name: &'a str,
-    owner: UserId,
-    created: NaiveDateTime,
-}
-
-#[derive(Insertable)]
 #[diesel(table_name = shared::schema::messages)]
 struct NewMessage<'a> {
     chat: ChatId,
@@ -368,17 +364,131 @@ struct NewMessage<'a> {
     created: NaiveDateTime,
 }
 
+#[derive(Serialize)]
+struct OllamaRequest {
+    model: String,
+    prompt: String,
+    context: Option<Vec<u32>>,
+}
+
+#[allow(unused)]
+#[derive(Debug)]
+enum OllamaResponse {
+    Error {
+        error: String,
+    },
+    Progress {
+        model: String,
+        created_at: NaiveDateTime,
+        response: String,
+    },
+    Finish {
+        model: String,
+        created_at: NaiveDateTime,
+        context: Vec<u32>,
+        total_duration: u32,
+        load_duration: u32,
+        prompt_eval_count: u32,
+        prompt_eval_duration: u32,
+        eval_count: u32,
+        eval_duration: u32,
+    },
+}
+
+macro_rules! from_map {
+    ($map:expr, $key:literal, $typ:path) => {
+        if let Some($typ(inner)) = $map.remove($key) {
+            Ok(inner)
+        } else {
+            Err(serde::de::Error::missing_field($key))
+        }
+    };
+}
+
+impl<'de> Deserialize<'de> for OllamaResponse {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        fn u32_from_number<E: serde::de::Error>(num: Number) -> Result<u32, E> {
+            match num.as_u64() {
+                Some(num) => Ok(num as u32),
+                None => Err(E::custom("expected a non null number")),
+            }
+        }
+
+        fn u32_from_value<E: serde::de::Error>(value: Value) -> Result<u32, E> {
+            let num = match value {
+                Value::Number(token) => token,
+                _ => return Err(E::custom("expected a number")),
+            };
+            u32_from_number(num)
+        }
+
+        let value = Value::deserialize(deserializer)?;
+        let Value::Object(mut map) = value else {
+            return Err(serde::de::Error::custom("Expected a JSON object"));
+        };
+
+        if let Some(Value::String(error)) = map.remove("error") {
+            return Ok(OllamaResponse::Error { error });
+        }
+
+        let model = from_map!(map, "model", Value::String)?;
+        let created_at = NaiveDateTime::parse_from_str(
+            &from_map!(map, "created_at", Value::String)?,
+            "%Y-%m-%dT%H:%M:%S%.fZ",
+        )
+        .map_err(serde::de::Error::custom)?;
+        let done = from_map!(map, "done", Value::Bool)?;
+
+        if done {
+            let context = from_map!(map, "context", Value::Array)?
+                .into_iter()
+                .map(u32_from_value)
+                .collect::<Result<Vec<_>, _>>()?;
+            let total_duration = u32_from_number(from_map!(map, "total_duration", Value::Number)?)?;
+            let load_duration = u32_from_number(from_map!(map, "load_duration", Value::Number)?)?;
+            let prompt_eval_count =
+                u32_from_number(from_map!(map, "prompt_eval_count", Value::Number)?)?;
+            let prompt_eval_duration =
+                u32_from_number(from_map!(map, "prompt_eval_duration", Value::Number)?)?;
+            let eval_count = u32_from_number(from_map!(map, "eval_count", Value::Number)?)?;
+            let eval_duration = u32_from_number(from_map!(map, "eval_duration", Value::Number)?)?;
+            Ok(OllamaResponse::Finish {
+                model,
+                created_at,
+                context,
+                total_duration,
+                load_duration,
+                prompt_eval_count,
+                prompt_eval_duration,
+                eval_count,
+                eval_duration,
+            })
+        } else {
+            let response = from_map!(map, "response", Value::String)?;
+            Ok(OllamaResponse::Progress {
+                model,
+                created_at,
+                response,
+            })
+        }
+    }
+}
+
 async fn submit_chat_message(
     mut db: DatabaseConnection,
     user: UserId,
-    chat: ChatId,
+    chat: FullChat,
     content: &str,
     state: Data<State>,
+    config: Data<Config>,
 ) -> (Message, Message) {
     // put new message into database
     let now = Utc::now().naive_utc();
     let new_message = NewMessage {
-        chat,
+        chat: chat.id,
         author: AuthorType::User,
         content,
         created: now,
@@ -390,7 +500,7 @@ async fn submit_chat_message(
 
     // put empty assistant response into database
     let assistant_message = NewMessage {
-        chat,
+        chat: chat.id,
         author: AuthorType::AssistantResponding,
         content: "",
         created: now,
@@ -400,56 +510,135 @@ async fn submit_chat_message(
         .get_result(&mut db)
         .expect("Error inserting assistant message into new chat");
 
-    // mock llm response
+    // query llm
     {
         let assistant_message = assistant_message.clone();
+        let context: Vec<u32> = chat
+            .context
+            .iter()
+            .copied()
+            .filter_map(identity)
+            .map(|x| x as u32)
+            .collect();
+        let prompt = content.to_string();
         actix::spawn(async move {
-            let mut initial_interval = time::interval(Duration::from_millis(5000));
-            initial_interval.tick().await;
-            let mut interval = time::interval(Duration::from_millis(20));
-            let message = assistant_message.id;
-            let mock_text = "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.";
+            if let Err(error) = async {
+                let message = assistant_message.id;
 
-            // send a bunch of tokens in chunks
-            for chunk in mock_text
-                .chars()
-                .collect::<Vec<_>>()
-                .chunks(4)
-                .map(|c| c.iter().collect::<String>())
-            {
+                let client = Client::new();
+                let mut response = client
+                    .post(format!("{}/api/generate", config.llm_api_url))
+                    .json(&OllamaRequest {
+                        model: "llama2:7b".to_string(),
+                        prompt,
+                        context: (!context.is_empty()).then_some(context),
+                    })
+                    .send()
+                    .await?
+                    .bytes_stream();
+
+                let mut response_message = String::new();
+
+                let (created_at, context) = 'message_loop: {
+                    while let Some(bytes) = response.next().await {
+                        let response: OllamaResponse = serde_json::from_slice(&bytes?)?;
+                        // println!("message: {response:?}");
+                        match response {
+                            OllamaResponse::Error { error } => Err(error)?,
+                            OllamaResponse::Progress { response, .. } => {
+                                // append new tokens to response
+                                response_message.push_str(&response);
+
+                                state.write().unwrap().send_message(
+                                    user,
+                                    websocket::Message::Message {
+                                        chat: chat.id,
+                                        message,
+                                        content: websocket::chat::Message::Token(response),
+                                    },
+                                );
+                            }
+                            OllamaResponse::Finish {
+                                created_at,
+                                context,
+                                ..
+                            } => {
+                                break 'message_loop (created_at, context);
+                            }
+                        }
+                    }
+                    return Err("Unexpected end of message stream".into());
+                };
+
+                // send completion message
                 state.write().unwrap().send_message(
                     user,
                     websocket::Message::Message {
-                        chat,
+                        chat: chat.id,
                         message,
-                        content: websocket::chat::Message::Token(chunk),
+                        content: websocket::chat::Message::Finish,
                     },
                 );
-                interval.tick().await;
+
+                // push completed message to database
+                update(&assistant_message)
+                    .set((
+                        messages_dsl::created.eq(created_at),
+                        messages_dsl::content.eq(response_message),
+                        messages_dsl::author.eq(AuthorType::AssistantFinished),
+                    ))
+                    .execute(&mut db)
+                    .expect("Error updating database");
+
+                // store chat context
+                let context: Vec<Option<i32>> = context
+                    .into_iter()
+                    .map(|token| Some(token as i32))
+                    .collect();
+                update(&chat)
+                    .set(chats_dsl::context.eq(context))
+                    .execute(&mut db)
+                    .expect("Error updating database");
+
+                Ok::<_, Box<dyn Error>>(())
             }
+            .await
+            {
+                eprintln!("Error requesting completion from llm api: {:#?}", error);
 
-            // send completion message
-            state.write().unwrap().send_message(
-                user,
-                websocket::Message::Message {
-                    chat,
-                    message,
-                    content: websocket::chat::Message::Finish,
-                },
-            );
+                let error_text = format!("{error}");
 
-            // push completed message to database
-            update(&assistant_message)
-                .set((
-                    messages_dsl::content.eq(mock_text),
-                    messages_dsl::author.eq(AuthorType::AssistantFinished),
-                ))
-                .execute(&mut db)
-                .expect("Error updating database");
+                // send error message
+                state.write().unwrap().send_message(
+                    user,
+                    websocket::Message::Message {
+                        chat: chat.id,
+                        message: assistant_message.id,
+                        content: websocket::chat::Message::Error(error_text.clone()),
+                    },
+                );
+
+                // push error message to database
+                update(&assistant_message)
+                    .set((
+                        messages_dsl::error.eq(error_text),
+                        messages_dsl::author.eq(AuthorType::AssistantError),
+                    ))
+                    .execute(&mut db)
+                    .expect("Error updating database");
+            }
         });
     }
 
     (user_message, assistant_message)
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = shared::schema::chats)]
+struct NewChat<'a> {
+    name: &'a str,
+    owner: UserId,
+    created: NaiveDateTime,
 }
 
 #[post("/new-chat")]
@@ -457,6 +646,7 @@ async fn new_chat_handler(
     identity: Identity,
     db: Data<Database>,
     state: Data<State>,
+    config: Data<Config>,
     body: Json<new_chat::Request>,
 ) -> Response<new_chat::Response> {
     // decode request
@@ -472,16 +662,24 @@ async fn new_chat_handler(
         owner: user_id,
         created: now.clone(),
     };
-    let chat: Chat = insert_into(chats_dsl::chats)
+    let chat: FullChat = insert_into(chats_dsl::chats)
         .values(&chat)
         .get_result(&mut db)
         .expect("Error insterting new chat");
 
     // place new chat message in database
-    let (user_message, assistant_response) =
-        submit_chat_message(db, user_id, chat.id, &body.initial_message, state).await;
+    let (user_message, assistant_response) = submit_chat_message(
+        db,
+        user_id,
+        chat.clone(),
+        &body.initial_message,
+        state,
+        config,
+    )
+    .await;
 
     // send chat id and assistant message id back
+    let chat = chat.into();
     Okay(new_chat::Response {
         chat,
         user_message,
@@ -511,9 +709,9 @@ fn get_chat_by_user(
     identity: Identity,
     chat: ChatId,
     db: &mut DatabaseConnection,
-) -> Result<Chat, GetChatError> {
+) -> Result<FullChat, GetChatError> {
     // get associated chat
-    let Some(chat): Option<Chat> = chats_dsl::chats
+    let Some(chat): Option<FullChat> = chats_dsl::chats
         .find(chat)
         .first(db)
         .optional()
@@ -538,6 +736,7 @@ async fn chat_message_handler(
     identity: Identity,
     db: Data<Database>,
     state: Data<State>,
+    config: Data<Config>,
     body: Json<chat_message::Request>,
 ) -> Response<chat_message::Response> {
     // decode request
@@ -553,7 +752,7 @@ async fn chat_message_handler(
 
     // place new chat message in database
     let (user_message, assistant_response) =
-        submit_chat_message(db, chat.owner, body.chat, &body.message, state).await;
+        submit_chat_message(db, chat.owner, chat, &body.message, state, config).await;
 
     // send newly created messages back
     Okay(chat_message::Response::Success {
@@ -569,10 +768,11 @@ async fn list_chats_handler(identity: Identity, db: Data<Database>) -> impl Resp
     // get chats owned by user
     let user_id = identity.user_id().expect("Failed to get user id");
     let mut db = db.get().expect("Database not available");
-    let chats: Vec<Chat> = chats_dsl::chats
+    let chats: Vec<FullChat> = chats_dsl::chats
         .filter(chats_dsl::owner.eq(user_id))
         .load(&mut db)
         .expect("Error querying database");
+    let chats = chats.into_iter().map(Chat::from).collect();
 
     HttpResponse::Ok().json(list_chats::Response { chats })
 }
@@ -655,6 +855,7 @@ async fn main() -> std::io::Result<()> {
     let port = env::var("PORT").expect("PORT must be set");
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let redis_url = env::var("REDIS_URL").unwrap_or("redis://127.0.0.1:6379".to_string());
+    let llm_api_url = env::var("LLM_API_URL").expect("LLM_API_URL must be set");
     let admin_signup = env::var("ADMIN_SIGNUP").map(|val| val.trim().to_ascii_uppercase())
         == Ok("TRUE".to_string());
     let host_addr = format!("0.0.0.0:{}", port);
@@ -662,6 +863,7 @@ async fn main() -> std::io::Result<()> {
     println!("port: {port}");
     println!("database_url: {database_url}");
     println!("redis_url: {redis_url}");
+    println!("llm_api_url: {llm_api_url}");
     println!("admin_signup: {admin_signup}");
 
     // connect to db
@@ -677,7 +879,10 @@ async fn main() -> std::io::Result<()> {
 
     // initialize app state & config
     let state = State::default();
-    let config = Config { admin_signup };
+    let config = Config {
+        admin_signup,
+        llm_api_url,
+    };
 
     // serve app
     println!("Running on {}", host_addr);

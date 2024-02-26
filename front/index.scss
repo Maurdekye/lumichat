@@ -11,6 +11,8 @@ $success: rgb(35, 68, 34);
 $progress: rgb(48, 59, 69);
 $error: rgb(48, 32, 24);
 
+$error-text: rgb(216, 110, 83);
+
 * {
   min-width: 0;
   color: $text;
@@ -243,6 +245,14 @@ html, body {
           .message-author {
             font-weight: 700;
             font-size: 18px;
+
+            &.error {
+              color: $error-text
+            }
+          }
+
+          .message.error {
+            color: $error-text
           }
   
           &:first-child {

@@ -13,6 +13,7 @@ diesel::table! {
         name -> Varchar,
         owner -> Int4,
         created -> Timestamp,
+        context -> Array<Nullable<Int4>>,
     }
 }
 
@@ -25,6 +26,7 @@ diesel::table! {
         chat -> Int4,
         author -> AuthorType,
         content -> Text,
+        error -> Nullable<Text>,
         created -> Timestamp,
     }
 }
