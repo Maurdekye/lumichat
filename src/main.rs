@@ -837,7 +837,7 @@ async fn list_messages_handler(
     // get messages
     let messages = messages_dsl::messages
         .filter(messages_dsl::chat.eq(chat.id))
-        .order(messages_dsl::created.desc())
+        .order(messages_dsl::created.asc())
         .load(&mut db)
         .expect("Error querying database");
 
