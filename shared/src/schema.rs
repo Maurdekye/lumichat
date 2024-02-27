@@ -14,6 +14,8 @@ diesel::table! {
         owner -> Int4,
         created -> Timestamp,
         context -> Array<Nullable<Int4>>,
+        #[max_length = 255]
+        model -> Varchar,
     }
 }
 

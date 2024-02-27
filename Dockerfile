@@ -4,7 +4,7 @@ WORKDIR /app
 
 # update apt packages
 RUN apt-get update
-RUN apt-get install -y libpq-dev
+RUN apt-get install -y libpq-dev pkg-config
 
 # install trunk
 RUN cargo install --locked trunk

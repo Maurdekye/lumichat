@@ -23,13 +23,182 @@ use diesel::{insert_into, update};
 use futures::stream::StreamExt;
 use reqwest::Client;
 
-use serde::{Deserialize, Serialize};
-use serde_json::{Number, Value};
+use serde::Serialize;
 use shared::{api::*, model::*, websocket};
 
 use shared::schema::{
     chats::dsl as chats_dsl, messages::dsl as messages_dsl, users::dsl as users_dsl,
 };
+
+mod ollama {
+    use chrono::NaiveDateTime;
+    use serde::{Deserialize, Deserializer};
+    use serde_json::Value;
+
+    fn ollama_datetime_deserializer<'de, D>(deserializer: D) -> Result<NaiveDateTime, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let Value::String(value) = Value::deserialize(deserializer)? else {
+            return Err(serde::de::Error::custom("Expected date string"));
+        };
+        NaiveDateTime::parse_from_str(&value, "%Y-%m-%dT%H:%M:%S%.fZ")
+            .map_err(serde::de::Error::custom)
+    }
+
+    pub mod generate {
+        use chrono::NaiveDateTime;
+        use serde::{Deserialize, Serialize};
+        use serde_json::{Number, Value};
+
+        #[derive(Serialize)]
+        pub struct Request {
+            pub model: String,
+            pub prompt: String,
+            pub context: Option<Vec<u32>>,
+        }
+
+        #[allow(unused)]
+        #[derive(Debug)]
+        pub enum Response {
+            Error {
+                error: String,
+            },
+            Progress {
+                model: String,
+                created_at: NaiveDateTime,
+                response: String,
+            },
+            Finish {
+                model: String,
+                created_at: NaiveDateTime,
+                context: Vec<u32>,
+                total_duration: u32,
+                load_duration: u32,
+                prompt_eval_count: u32,
+                prompt_eval_duration: u32,
+                eval_count: u32,
+                eval_duration: u32,
+            },
+        }
+
+        macro_rules! from_map {
+            ($map:expr, $key:literal, $typ:path) => {
+                if let Some($typ(inner)) = $map.remove($key) {
+                    Ok(inner)
+                } else {
+                    Err(serde::de::Error::missing_field($key))
+                }
+            };
+        }
+
+        impl<'de> Deserialize<'de> for Response {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                fn u32_from_number<E: serde::de::Error>(num: Number) -> Result<u32, E> {
+                    match num.as_u64() {
+                        Some(num) => Ok(num as u32),
+                        None => Err(E::custom("expected a non null number")),
+                    }
+                }
+
+                fn u32_from_value<E: serde::de::Error>(value: Value) -> Result<u32, E> {
+                    let num = match value {
+                        Value::Number(token) => token,
+                        _ => return Err(E::custom("expected a number")),
+                    };
+                    u32_from_number(num)
+                }
+
+                let value = Value::deserialize(deserializer)?;
+                let Value::Object(mut map) = value else {
+                    return Err(serde::de::Error::custom("Expected a JSON object"));
+                };
+
+                if let Some(Value::String(error)) = map.remove("error") {
+                    return Ok(Response::Error { error });
+                }
+
+                let model = from_map!(map, "model", Value::String)?;
+                let created_at = NaiveDateTime::parse_from_str(
+                    &from_map!(map, "created_at", Value::String)?,
+                    "%Y-%m-%dT%H:%M:%S%.fZ",
+                )
+                .map_err(serde::de::Error::custom)?;
+                let done = from_map!(map, "done", Value::Bool)?;
+
+                if done {
+                    let context = from_map!(map, "context", Value::Array)?
+                        .into_iter()
+                        .map(u32_from_value)
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let total_duration =
+                        u32_from_number(from_map!(map, "total_duration", Value::Number)?)?;
+                    let load_duration =
+                        u32_from_number(from_map!(map, "load_duration", Value::Number)?)?;
+                    let prompt_eval_count =
+                        u32_from_number(from_map!(map, "prompt_eval_count", Value::Number)?)?;
+                    let prompt_eval_duration =
+                        u32_from_number(from_map!(map, "prompt_eval_duration", Value::Number)?)?;
+                    let eval_count = u32_from_number(from_map!(map, "eval_count", Value::Number)?)?;
+                    let eval_duration =
+                        u32_from_number(from_map!(map, "eval_duration", Value::Number)?)?;
+                    Ok(Response::Finish {
+                        model,
+                        created_at,
+                        context,
+                        total_duration,
+                        load_duration,
+                        prompt_eval_count,
+                        prompt_eval_duration,
+                        eval_count,
+                        eval_duration,
+                    })
+                } else {
+                    let response = from_map!(map, "response", Value::String)?;
+                    Ok(Response::Progress {
+                        model,
+                        created_at,
+                        response,
+                    })
+                }
+            }
+        }
+    }
+
+    pub mod tags {
+        use chrono::NaiveDateTime;
+        use serde::Deserialize;
+
+        use super::ollama_datetime_deserializer;
+
+        #[derive(Deserialize)]
+        pub struct Response {
+            pub models: Vec<ModelInfo>,
+        }
+
+        #[derive(Deserialize)]
+        pub struct ModelInfo {
+            pub name: String,
+            #[serde(deserialize_with = "ollama_datetime_deserializer")]
+            pub modified_at: NaiveDateTime,
+            pub size: u64,
+            pub digest: String,
+            pub details: ModelDetails,
+        }
+
+        #[derive(Deserialize)]
+        pub struct ModelDetails {
+            pub format: String,
+            pub family: String,
+            pub families: Option<Vec<String>>,
+            pub parameter_size: String,
+            pub quantization_level: String,
+        }
+    }
+}
 
 type Database = r2d2::Pool<ConnectionManager<PgConnection>>;
 type DatabaseConnection = r2d2::PooledConnection<ConnectionManager<PgConnection>>;
@@ -364,119 +533,6 @@ struct NewMessage<'a> {
     created: NaiveDateTime,
 }
 
-#[derive(Serialize)]
-struct OllamaRequest {
-    model: String,
-    prompt: String,
-    context: Option<Vec<u32>>,
-}
-
-#[allow(unused)]
-#[derive(Debug)]
-enum OllamaResponse {
-    Error {
-        error: String,
-    },
-    Progress {
-        model: String,
-        created_at: NaiveDateTime,
-        response: String,
-    },
-    Finish {
-        model: String,
-        created_at: NaiveDateTime,
-        context: Vec<u32>,
-        total_duration: u32,
-        load_duration: u32,
-        prompt_eval_count: u32,
-        prompt_eval_duration: u32,
-        eval_count: u32,
-        eval_duration: u32,
-    },
-}
-
-macro_rules! from_map {
-    ($map:expr, $key:literal, $typ:path) => {
-        if let Some($typ(inner)) = $map.remove($key) {
-            Ok(inner)
-        } else {
-            Err(serde::de::Error::missing_field($key))
-        }
-    };
-}
-
-impl<'de> Deserialize<'de> for OllamaResponse {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        fn u32_from_number<E: serde::de::Error>(num: Number) -> Result<u32, E> {
-            match num.as_u64() {
-                Some(num) => Ok(num as u32),
-                None => Err(E::custom("expected a non null number")),
-            }
-        }
-
-        fn u32_from_value<E: serde::de::Error>(value: Value) -> Result<u32, E> {
-            let num = match value {
-                Value::Number(token) => token,
-                _ => return Err(E::custom("expected a number")),
-            };
-            u32_from_number(num)
-        }
-
-        let value = Value::deserialize(deserializer)?;
-        let Value::Object(mut map) = value else {
-            return Err(serde::de::Error::custom("Expected a JSON object"));
-        };
-
-        if let Some(Value::String(error)) = map.remove("error") {
-            return Ok(OllamaResponse::Error { error });
-        }
-
-        let model = from_map!(map, "model", Value::String)?;
-        let created_at = NaiveDateTime::parse_from_str(
-            &from_map!(map, "created_at", Value::String)?,
-            "%Y-%m-%dT%H:%M:%S%.fZ",
-        )
-        .map_err(serde::de::Error::custom)?;
-        let done = from_map!(map, "done", Value::Bool)?;
-
-        if done {
-            let context = from_map!(map, "context", Value::Array)?
-                .into_iter()
-                .map(u32_from_value)
-                .collect::<Result<Vec<_>, _>>()?;
-            let total_duration = u32_from_number(from_map!(map, "total_duration", Value::Number)?)?;
-            let load_duration = u32_from_number(from_map!(map, "load_duration", Value::Number)?)?;
-            let prompt_eval_count =
-                u32_from_number(from_map!(map, "prompt_eval_count", Value::Number)?)?;
-            let prompt_eval_duration =
-                u32_from_number(from_map!(map, "prompt_eval_duration", Value::Number)?)?;
-            let eval_count = u32_from_number(from_map!(map, "eval_count", Value::Number)?)?;
-            let eval_duration = u32_from_number(from_map!(map, "eval_duration", Value::Number)?)?;
-            Ok(OllamaResponse::Finish {
-                model,
-                created_at,
-                context,
-                total_duration,
-                load_duration,
-                prompt_eval_count,
-                prompt_eval_duration,
-                eval_count,
-                eval_duration,
-            })
-        } else {
-            let response = from_map!(map, "response", Value::String)?;
-            Ok(OllamaResponse::Progress {
-                model,
-                created_at,
-                response,
-            })
-        }
-    }
-}
-
 async fn submit_chat_message(
     mut db: DatabaseConnection,
     user: UserId,
@@ -528,8 +584,8 @@ async fn submit_chat_message(
                 let client = Client::new();
                 let mut response = client
                     .post(format!("{}/api/generate", config.llm_api_url))
-                    .json(&OllamaRequest {
-                        model: "llama2:7b".to_string(),
+                    .json(&ollama::generate::Request {
+                        model: chat.model.clone(),
                         prompt,
                         context: (!context.is_empty()).then_some(context),
                     })
@@ -541,11 +597,11 @@ async fn submit_chat_message(
 
                 let (created_at, context) = 'message_loop: {
                     while let Some(bytes) = response.next().await {
-                        let response: OllamaResponse = serde_json::from_slice(&bytes?)?;
+                        let response: ollama::generate::Response = serde_json::from_slice(&bytes?)?;
                         // println!("message: {response:?}");
                         match response {
-                            OllamaResponse::Error { error } => Err(error)?,
-                            OllamaResponse::Progress { response, .. } => {
+                            ollama::generate::Response::Error { error } => Err(error)?,
+                            ollama::generate::Response::Progress { response, .. } => {
                                 // append new tokens to response
                                 response_message.push_str(&response);
 
@@ -558,7 +614,7 @@ async fn submit_chat_message(
                                     },
                                 );
                             }
-                            OllamaResponse::Finish {
+                            ollama::generate::Response::Finish {
                                 created_at,
                                 context,
                                 ..
@@ -639,6 +695,7 @@ struct NewChat<'a> {
     name: &'a str,
     owner: UserId,
     created: NaiveDateTime,
+    model: &'a str,
 }
 
 #[post("/new-chat")]
@@ -661,6 +718,7 @@ async fn new_chat_handler(
         name: "New Chat",
         owner: user_id,
         created: now.clone(),
+        model: &body.model,
     };
     let chat: FullChat = insert_into(chats_dsl::chats)
         .values(&chat)
@@ -846,6 +904,28 @@ async fn list_messages_handler(
     Okay(list_messages::Response::Success { messages })
 }
 
+#[get("/list-models")]
+async fn list_models_handler(config: Data<Config>) -> Response<list_models::Response> {
+    // fetch list of models
+
+    let client = Client::new();
+    let response = client
+        .get(format!("{}/api/tags", config.llm_api_url))
+        .send()
+        .await
+        .expect("Error communicating with llm api")
+        .bytes()
+        .await
+        .expect("Error collecting response from llm api");
+
+    let response: ollama::tags::Response =
+        serde_json::from_slice(&response).expect("Error deserializing llm api response");
+
+    let list: Vec<String> = response.models.into_iter().map(|m| m.name).collect();
+    let default = list.first().cloned().unwrap_or_default();
+    Okay(list_models::Response { list, default })
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     println!("Starting");
@@ -907,6 +987,7 @@ async fn main() -> std::io::Result<()> {
             .service(list_chats_handler)
             .service(check_chat_handler)
             .service(list_messages_handler)
+            .service(list_models_handler)
             .service(fs::Files::new("/", "./front/dist").index_file("index.html"))
     })
     .workers(

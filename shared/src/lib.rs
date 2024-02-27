@@ -55,6 +55,7 @@ pub mod model {
         pub owner: UserId,
         pub created: NaiveDateTime,
         pub context: Vec<Option<i32>>,
+        pub model: String,
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -63,6 +64,7 @@ pub mod model {
         pub name: String,
         pub owner: UserId,
         pub created: NaiveDateTime,
+        pub model: String,
     }
 
     impl From<FullChat> for Chat {
@@ -72,6 +74,7 @@ pub mod model {
                 name,
                 owner,
                 created,
+                model,
                 ..
             }: FullChat,
         ) -> Self {
@@ -80,6 +83,7 @@ pub mod model {
                 name,
                 owner,
                 created,
+                model,
             }
         }
     }
@@ -181,6 +185,7 @@ pub mod api {
         #[derive(Serialize, Deserialize, Clone, Debug)]
         pub struct Request {
             pub initial_message: String,
+            pub model: String,
         }
 
         #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -276,6 +281,16 @@ pub mod api {
         pub enum Response {
             Success { messages: Vec<Message> },
             Failure(FailureReason),
+        }
+    }
+
+    pub mod list_models {
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Serialize, Deserialize, Clone, Debug)]
+        pub struct Response {
+            pub list: Vec<String>,
+            pub default: String,
         }
     }
 }
