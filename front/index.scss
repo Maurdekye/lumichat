@@ -1,6 +1,6 @@
-$primary: rgb(42, 42, 42);
-$secondary: rgb(49, 49, 49);
-$tertiary: rgb(87, 87, 87);
+$primary: rgb(26, 26, 26);
+$secondary: rgb(36, 36, 36);
+$tertiary: rgb(68, 68, 68);
 $trim: rgb(79, 78, 78);
 $trim-light: rgb(157, 157, 157);
 
@@ -275,8 +275,7 @@ $sidebar-width: 14em;
           align-items: center;
     
           .message-row {
-            margin: 1.2em;
-            margin-bottom: 0;
+            margin: 0 1.2em 2.4em;
             display: block;
             flex-flow: row;
             width: min(60em, calc(100% - 0.6em));
@@ -311,6 +310,23 @@ $sidebar-width: 14em;
           .chat-input {
             width: 80%;
             padding: 0.8em;
+          }
+
+          .submit-message {
+            border-radius: 0.35em;
+            margin-left: 1em;
+            width: 40px;
+            height: 40px;
+            border: 1px solid $trim;
+            cursor: pointer;
+
+            &:hover {
+              background-color: $secondary;
+            }
+          
+            &:active {
+              background-color: $interact;
+            }
           }
         }
 

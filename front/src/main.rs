@@ -428,6 +428,7 @@ mod session {
         }
     }
 
+    #[derive(Debug)]
     pub struct ModelSelection {
         default: String,
         selected: String,
@@ -1017,7 +1018,10 @@ mod session {
                 }
             }
 
+            log!(format!("model selection: {:#?}", &self.model_selection));
+
             // render page
+            let input_disabled = self.current_chat.as_ref().is_some_and(|c| !RefCell::borrow(c).is_available());
             html! {
                 <div class="session">
                     <div class="sidebar">
@@ -1063,14 +1067,13 @@ mod session {
                                             Unloaded | Loading => html! { <></> },
                                             Loaded(model_selection) => html! {
                                                 <select class="model-selector" 
-                                                    value={model_selection.selected.clone()} 
                                                     onchange={ctx.link().callback(|event: Event| {
                                                         let input: HtmlInputElement = event.target_unchecked_into();
                                                         Msg::SelectModel(input.value())
                                                     })}>
                                                     {
                                                         for model_selection.models.iter().map(|model| html! {
-                                                            <option value={model.clone()}>{model}</option>
+                                                            <option value={model.clone()} selected={model == &model_selection.selected}>{model}</option>
                                                         })
                                                     }
                                                 </select>
@@ -1142,7 +1145,7 @@ mod session {
                                 <div class="chat-input-container">
                                     <textarea class="chat-input"
                                         rows={(self.message_input.chars().filter(|c| *c == '\n').count() + 1).min(24).to_string()}
-                                        disabled={self.current_chat.as_ref().is_some_and(|c| !RefCell::borrow(c).is_available())}
+                                        disabled={input_disabled}
                                         oninput={ctx.link().callback(|e: InputEvent| {
                                             let input: HtmlInputElement = e.target_unchecked_into();
                                             Msg::UpdateMessage(input.value())
@@ -1160,6 +1163,19 @@ mod session {
                                         })}
                                         value={self.message_input.clone()}
                                     ></textarea>
+                                    <div class="submit-message" 
+                                        disabled={input_disabled}
+                                        onclick={
+                                            let message_input = self.message_input.clone();
+                                            ctx.link().batch_callback(move |_| {
+                                                (!message_input.is_empty()).then_some(Msg::SubmitMessage)
+                                            })
+                                        }
+                                    >
+                                        <svg width="40" height="40" viewBox="0 20 60 60" xmlns="http://www.w3.org/2000/svg">
+                                            <path d="M 30,50 L 10,70 L 50,50 L 10,30 L 30,50 L 10,70" stroke="rgb(196, 196, 196)" fill="transparent" stroke-width="5"></path>
+                                        </svg>
+                                    </div>
                                 </div>
                             </div>
                         </div>
