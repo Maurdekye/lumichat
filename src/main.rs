@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::convert::identity;
 use std::default::Default;
 use std::env;
 use std::error::Error;
@@ -31,9 +30,11 @@ use shared::schema::{
 };
 
 mod ollama {
+    use std::error::Error;
+
     use chrono::NaiveDateTime;
     use serde::{Deserialize, Deserializer};
-    use serde_json::Value;
+    use serde_json::{Number, Value};
 
     fn ollama_datetime_deserializer<'de, D>(deserializer: D) -> Result<NaiveDateTime, D::Error>
     where
@@ -42,14 +43,168 @@ mod ollama {
         let Value::String(value) = Value::deserialize(deserializer)? else {
             return Err(serde::de::Error::custom("Expected date string"));
         };
-        NaiveDateTime::parse_from_str(&value, "%Y-%m-%dT%H:%M:%S%.fZ")
-            .map_err(serde::de::Error::custom)
+        ollama_to_datetime(&value).map_err(serde::de::Error::custom)
     }
 
+    fn ollama_to_datetime(datestr: &str) -> Result<NaiveDateTime, impl Error> {
+        NaiveDateTime::parse_from_str(&datestr, "%Y-%m-%dT%H:%M:%S%.fZ")
+    }
+
+    fn u64_from_number<E: serde::de::Error>(num: Number) -> Result<u64, E> {
+        match num.as_u64() {
+            Some(num) => Ok(num),
+            None => Err(E::custom("expected a non null number")),
+        }
+    }
+
+    fn u64_from_value<E: serde::de::Error>(value: Value) -> Result<u64, E> {
+        let num = match value {
+            Value::Number(token) => token,
+            _ => return Err(E::custom("expected a number")),
+        };
+        u64_from_number(num)
+    }
+
+    macro_rules! from_map {
+        ($map:expr, $key:literal, $typ:path) => {
+            if let Some($typ(inner)) = $map.remove($key) {
+                Ok(inner)
+            } else {
+                Err(serde::de::Error::missing_field($key))
+            }
+        };
+    }
+
+    pub mod chat {
+        use super::{ollama_to_datetime, u64_from_number};
+        use chrono::NaiveDateTime;
+        use serde::{Deserialize, Serialize};
+        use serde_json::Value;
+
+        #[derive(Serialize, Deserialize)]
+        pub enum Role {
+            #[serde(rename = "user")]
+            User,
+            #[serde(rename = "assistant")]
+            Assistant,
+        }
+
+        impl From<shared::model::AuthorType> for Role {
+            fn from(value: shared::model::AuthorType) -> Self {
+                match value {
+                    shared::model::AuthorType::User => Role::User,
+                    _ => Role::Assistant,
+                }
+            }
+        }
+
+        #[derive(Serialize, Deserialize)]
+        pub struct Message {
+            pub role: Role,
+            pub content: String,
+        }
+
+        impl From<shared::model::Message> for Message {
+            fn from(value: shared::model::Message) -> Self {
+                Self {
+                    role: value.author.into(),
+                    content: value.content,
+                }
+            }
+        }
+
+        #[derive(Serialize)]
+        pub struct Request {
+            pub model: String,
+            pub messages: Vec<Message>,
+        }
+
+        pub enum Response {
+            Error {
+                error: String,
+            },
+            Progress {
+                model: String,
+                created_at: NaiveDateTime,
+                message: Message,
+            },
+            Finish {
+                model: String,
+                created_at: NaiveDateTime,
+                total_duration: u64,
+                load_duration: u64,
+                prompt_eval_count: u64,
+                prompt_eval_duration: u64,
+                eval_count: u64,
+                eval_duration: u64,
+            },
+        }
+
+        impl<'de> Deserialize<'de> for Response {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let value = Value::deserialize(deserializer)?;
+                let Value::Object(mut map) = value else {
+                    return Err(serde::de::Error::custom("Expected a JSON object"));
+                };
+
+                if let Some(Value::String(error)) = map.remove("error") {
+                    return Ok(Response::Error { error });
+                }
+
+                let model = from_map!(map, "model", Value::String)?;
+                let created_at = ollama_to_datetime(&from_map!(map, "created_at", Value::String)?)
+                    .map_err(serde::de::Error::custom)?;
+                let done = from_map!(map, "done", Value::Bool)?;
+
+                if done {
+                    let total_duration =
+                        u64_from_number(from_map!(map, "total_duration", Value::Number)?)?;
+                    let load_duration =
+                        u64_from_number(from_map!(map, "load_duration", Value::Number)?)?;
+                    let prompt_eval_count =
+                        u64_from_number(from_map!(map, "prompt_eval_count", Value::Number)?)?;
+                    let prompt_eval_duration =
+                        u64_from_number(from_map!(map, "prompt_eval_duration", Value::Number)?)?;
+                    let eval_count = u64_from_number(from_map!(map, "eval_count", Value::Number)?)?;
+                    let eval_duration =
+                        u64_from_number(from_map!(map, "eval_duration", Value::Number)?)?;
+                    Ok(Response::Finish {
+                        model,
+                        created_at,
+                        total_duration,
+                        load_duration,
+                        prompt_eval_count,
+                        prompt_eval_duration,
+                        eval_count,
+                        eval_duration,
+                    })
+                } else {
+                    let Some(message) = map.remove("message") else {
+                        return Err(serde::de::Error::missing_field("message"));
+                    };
+                    let message: Message =
+                        serde_json::from_value(message).map_err(serde::de::Error::custom)?;
+                    Ok(Response::Progress {
+                        model,
+                        created_at,
+                        message,
+                    })
+                }
+            }
+        }
+    }
+
+    // deprecated by move to chat api
+    #[allow(unused)]
     pub mod generate {
         use chrono::NaiveDateTime;
         use serde::{Deserialize, Serialize};
         use serde_json::{Number, Value};
+
+        use super::{ollama_to_datetime, u64_from_number, u64_from_value};
 
         #[derive(Serialize)]
         pub struct Request {
@@ -58,7 +213,6 @@ mod ollama {
             pub context: Option<Vec<u32>>,
         }
 
-        #[allow(unused)]
         #[derive(Debug)]
         pub enum Response {
             Error {
@@ -72,24 +226,14 @@ mod ollama {
             Finish {
                 model: String,
                 created_at: NaiveDateTime,
-                context: Vec<u32>,
-                total_duration: u32,
-                load_duration: u32,
-                prompt_eval_count: u32,
-                prompt_eval_duration: u32,
-                eval_count: u32,
-                eval_duration: u32,
+                context: Vec<u64>,
+                total_duration: u64,
+                load_duration: u64,
+                prompt_eval_count: u64,
+                prompt_eval_duration: u64,
+                eval_count: u64,
+                eval_duration: u64,
             },
-        }
-
-        macro_rules! from_map {
-            ($map:expr, $key:literal, $typ:path) => {
-                if let Some($typ(inner)) = $map.remove($key) {
-                    Ok(inner)
-                } else {
-                    Err(serde::de::Error::missing_field($key))
-                }
-            };
         }
 
         impl<'de> Deserialize<'de> for Response {
@@ -97,21 +241,6 @@ mod ollama {
             where
                 D: serde::Deserializer<'de>,
             {
-                fn u32_from_number<E: serde::de::Error>(num: Number) -> Result<u32, E> {
-                    match num.as_u64() {
-                        Some(num) => Ok(num as u32),
-                        None => Err(E::custom("expected a non null number")),
-                    }
-                }
-
-                fn u32_from_value<E: serde::de::Error>(value: Value) -> Result<u32, E> {
-                    let num = match value {
-                        Value::Number(token) => token,
-                        _ => return Err(E::custom("expected a number")),
-                    };
-                    u32_from_number(num)
-                }
-
                 let value = Value::deserialize(deserializer)?;
                 let Value::Object(mut map) = value else {
                     return Err(serde::de::Error::custom("Expected a JSON object"));
@@ -122,29 +251,26 @@ mod ollama {
                 }
 
                 let model = from_map!(map, "model", Value::String)?;
-                let created_at = NaiveDateTime::parse_from_str(
-                    &from_map!(map, "created_at", Value::String)?,
-                    "%Y-%m-%dT%H:%M:%S%.fZ",
-                )
-                .map_err(serde::de::Error::custom)?;
+                let created_at = ollama_to_datetime(&from_map!(map, "created_at", Value::String)?)
+                    .map_err(serde::de::Error::custom)?;
                 let done = from_map!(map, "done", Value::Bool)?;
 
                 if done {
                     let context = from_map!(map, "context", Value::Array)?
                         .into_iter()
-                        .map(u32_from_value)
+                        .map(u64_from_value)
                         .collect::<Result<Vec<_>, _>>()?;
                     let total_duration =
-                        u32_from_number(from_map!(map, "total_duration", Value::Number)?)?;
+                        u64_from_number(from_map!(map, "total_duration", Value::Number)?)?;
                     let load_duration =
-                        u32_from_number(from_map!(map, "load_duration", Value::Number)?)?;
+                        u64_from_number(from_map!(map, "load_duration", Value::Number)?)?;
                     let prompt_eval_count =
-                        u32_from_number(from_map!(map, "prompt_eval_count", Value::Number)?)?;
+                        u64_from_number(from_map!(map, "prompt_eval_count", Value::Number)?)?;
                     let prompt_eval_duration =
-                        u32_from_number(from_map!(map, "prompt_eval_duration", Value::Number)?)?;
-                    let eval_count = u32_from_number(from_map!(map, "eval_count", Value::Number)?)?;
+                        u64_from_number(from_map!(map, "prompt_eval_duration", Value::Number)?)?;
+                    let eval_count = u64_from_number(from_map!(map, "eval_count", Value::Number)?)?;
                     let eval_duration =
-                        u32_from_number(from_map!(map, "eval_duration", Value::Number)?)?;
+                        u64_from_number(from_map!(map, "eval_duration", Value::Number)?)?;
                     Ok(Response::Finish {
                         model,
                         created_at,
@@ -230,6 +356,15 @@ where
     }
 }
 
+macro_rules! response_try {
+    ($result:expr) => {
+        match $result {
+            Ok(value) => value,
+            Err(error) => return $crate::Response::BadRequest(error),
+        }
+    };
+}
+
 struct Websocket;
 
 impl Actor for Websocket {
@@ -281,12 +416,16 @@ struct StateInner {
 }
 
 impl StateInner {
+    fn send_to_connections(connections: &mut Vec<Addr<Websocket>>, message: websocket::Message) {
+        connections.retain(Addr::connected);
+        for connection in connections.iter_mut() {
+            connection.do_send(message.clone().into());
+        }
+    }
+
     pub fn send_message(&mut self, user_id: UserId, message: websocket::Message) {
         if let Some(connections) = self.websock_connections.get_mut(&user_id) {
-            connections.retain(Addr::connected);
-            for connection in connections.iter_mut() {
-                connection.do_send(message.clone().into());
-            }
+            StateInner::send_to_connections(connections, message);
             if connections.is_empty() {
                 self.websock_connections.remove(&user_id);
             }
@@ -296,10 +435,7 @@ impl StateInner {
     #[allow(unused)]
     pub fn broadcast_message(&mut self, message: websocket::Message) {
         for (_user_id, connections) in self.websock_connections.iter_mut() {
-            connections.retain(Addr::connected);
-            for connection in connections {
-                connection.do_send(message.clone().into())
-            }
+            StateInner::send_to_connections(connections, message.clone());
         }
         self.websock_connections.retain(|_, c| !c.is_empty());
     }
@@ -418,11 +554,9 @@ async fn create_user_inner(
     println!("/create-user: {body:#?}");
 
     // validate password
-    if let Err(validation_error) = validate_password(&body.password) {
-        return BadRequest(create_user::Response::Failure(
-            create_user::FailureReason::InvalidPassword(validation_error),
-        ));
-    }
+    response_try!(validate_password(&body.password)
+        .map_err(create_user::FailureReason::InvalidPassword)
+        .map_err(create_user::Response::Failure));
 
     // check for existing users
     let user_query = users_dsl::users
@@ -536,7 +670,7 @@ struct NewMessage<'a> {
 async fn submit_chat_message(
     mut db: DatabaseConnection,
     user: UserId,
-    chat: FullChat,
+    chat: Chat,
     content: &str,
     state: Data<State>,
     config: Data<Config>,
@@ -554,6 +688,13 @@ async fn submit_chat_message(
         .get_result(&mut db)
         .expect("Error inserting message into new chat");
 
+    // get prior message context for llm query
+    let messages: Vec<Message> = messages_dsl::messages
+        .filter(messages_dsl::chat.eq(chat.id))
+        .order(messages_dsl::created.asc())
+        .load(&mut db)
+        .expect("Error querying database");
+
     // put empty assistant response into database
     let assistant_message = NewMessage {
         chat: chat.id,
@@ -569,25 +710,19 @@ async fn submit_chat_message(
     // query llm
     {
         let assistant_message = assistant_message.clone();
-        let context: Vec<u32> = chat
-            .context
-            .iter()
-            .copied()
-            .filter_map(identity)
-            .map(|x| x as u32)
-            .collect();
-        let prompt = content.to_string();
         actix::spawn(async move {
             if let Err(error) = async {
                 let message = assistant_message.id;
 
                 let client = Client::new();
                 let mut response = client
-                    .post(format!("{}/api/generate", config.llm_api_url))
-                    .json(&ollama::generate::Request {
+                    .post(format!("{}/api/chat", config.llm_api_url))
+                    .json(&ollama::chat::Request {
                         model: chat.model.clone(),
-                        prompt,
-                        context: (!context.is_empty()).then_some(context),
+                        messages: messages
+                            .into_iter()
+                            .map(ollama::chat::Message::from)
+                            .collect(),
                     })
                     .send()
                     .await?
@@ -595,31 +730,37 @@ async fn submit_chat_message(
 
                 let mut response_message = String::new();
 
-                let (created_at, context) = 'message_loop: {
+                let created_at = 'message_loop: {
+                    let message_id = message;
+                    let mut is_first_token = true;
                     while let Some(bytes) = response.next().await {
-                        let response: ollama::generate::Response = serde_json::from_slice(&bytes?)?;
+                        let response: ollama::chat::Response = serde_json::from_slice(&bytes?)?;
                         // println!("message: {response:?}");
                         match response {
-                            ollama::generate::Response::Error { error } => Err(error)?,
-                            ollama::generate::Response::Progress { response, .. } => {
+                            ollama::chat::Response::Error { error } => Err(error)?,
+                            ollama::chat::Response::Progress { message, .. } => {
+                                let mut content = message.content;
+
+                                // remove prefixed space character if it appears
+                                if is_first_token && content.chars().next() == Some(' ') {
+                                    content = content.split_off(1);
+                                    is_first_token = false;
+                                }
+
                                 // append new tokens to response
-                                response_message.push_str(&response);
+                                response_message.push_str(&content);
 
                                 state.write().unwrap().send_message(
                                     user,
                                     websocket::Message::Message {
                                         chat: chat.id,
-                                        message,
-                                        content: websocket::chat::Message::Token(response),
+                                        message: message_id,
+                                        content: websocket::chat::Message::Token(content),
                                     },
                                 );
                             }
-                            ollama::generate::Response::Finish {
-                                created_at,
-                                context,
-                                ..
-                            } => {
-                                break 'message_loop (created_at, context);
+                            ollama::chat::Response::Finish { created_at, .. } => {
+                                break 'message_loop created_at;
                             }
                         }
                     }
@@ -643,16 +784,6 @@ async fn submit_chat_message(
                         messages_dsl::content.eq(response_message),
                         messages_dsl::author.eq(AuthorType::AssistantFinished),
                     ))
-                    .execute(&mut db)
-                    .expect("Error updating database");
-
-                // store chat context
-                let context: Vec<Option<i32>> = context
-                    .into_iter()
-                    .map(|token| Some(token as i32))
-                    .collect();
-                update(&chat)
-                    .set(chats_dsl::context.eq(context))
                     .execute(&mut db)
                     .expect("Error updating database");
 
@@ -720,7 +851,7 @@ async fn new_chat_handler(
         created: now.clone(),
         model: &body.model,
     };
-    let chat: FullChat = insert_into(chats_dsl::chats)
+    let chat: Chat = insert_into(chats_dsl::chats)
         .values(&chat)
         .get_result(&mut db)
         .expect("Error insterting new chat");
@@ -767,9 +898,9 @@ fn get_chat_by_user(
     identity: Identity,
     chat: ChatId,
     db: &mut DatabaseConnection,
-) -> Result<FullChat, GetChatError> {
+) -> Result<Chat, GetChatError> {
     // get associated chat
-    let Some(chat): Option<FullChat> = chats_dsl::chats
+    let Some(chat): Option<Chat> = chats_dsl::chats
         .find(chat)
         .first(db)
         .optional()
@@ -803,10 +934,9 @@ async fn chat_message_handler(
 
     // check database that chat exists
     let mut db = db.get().expect("Database not available");
-    let chat = match get_chat_by_user(identity, body.chat, &mut db) {
-        Ok(chat) => chat,
-        Err(err) => return BadRequest(chat_message::Response::Failure(err.into())),
-    };
+    let chat = response_try!(get_chat_by_user(identity, body.chat, &mut db)
+        .map_err(Into::into)
+        .map_err(chat_message::Response::Failure));
 
     // place new chat message in database
     let (user_message, assistant_response) =
@@ -819,6 +949,72 @@ async fn chat_message_handler(
     })
 }
 
+// can't derive AsChangeset on the shared Chat struct; causes trunk build to fail:
+//
+// error[E0277]: the trait bound `NaiveDateTime: AppearsOnTable<chats::table>` is not satisfied
+//   --> shared/src/lib.rs:50:39
+//    |
+// 50 |     #[derive(Queryable, Identifiable, AsChangeset, Serialize, Deserialize, Clone, Debug, PartialEq)]
+//    |                                       ^^^^^^^^^^^ the trait `AppearsOnTable<chats::table>` is not implemented for `NaiveDateTime`
+//    |
+//
+#[derive(AsChangeset)]
+#[diesel(table_name = shared::schema::chats)]
+pub struct ChatChangeset<'a> {
+    pub id: &'a ChatId,
+    pub name: &'a String,
+    pub owner: &'a UserId,
+    pub created: &'a NaiveDateTime,
+    pub model: &'a String,
+}
+
+impl<'a> From<&'a Chat> for ChatChangeset<'a> {
+    fn from(
+        Chat {
+            id,
+            name,
+            owner,
+            created,
+            model,
+        }: &'a Chat,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            owner,
+            created,
+            model,
+        }
+    }
+}
+
+get_chat_error_into!(update_chat::FailureReason);
+
+#[post("/update-chat")]
+async fn update_chat_handler(
+    identity: Identity,
+    body: Json<Chat>,
+    db: Data<Database>,
+) -> Response<update_chat::Response> {
+    // decode request
+    let chat = body.into_inner();
+    println!("/update-chat: {chat:#?}");
+
+    // check to make sure chat is valid
+    let mut db = db.get().expect("Database not available");
+    response_try!(get_chat_by_user(identity, chat.id, &mut db)
+        .map_err(Into::into)
+        .map_err(update_chat::Response::Failure));
+
+    // perform update
+    update(&chat)
+        .set(ChatChangeset::from(&chat))
+        .execute(&mut db)
+        .expect("Error updating database");
+
+    Okay(update_chat::Response::Success)
+}
+
 #[get("/list-chats")]
 async fn list_chats_handler(identity: Identity, db: Data<Database>) -> impl Responder {
     println!("/list-chats");
@@ -826,7 +1022,7 @@ async fn list_chats_handler(identity: Identity, db: Data<Database>) -> impl Resp
     // get chats owned by user
     let user_id = identity.user_id().expect("Failed to get user id");
     let mut db = db.get().expect("Database not available");
-    let chats: Vec<FullChat> = chats_dsl::chats
+    let chats: Vec<Chat> = chats_dsl::chats
         .filter(chats_dsl::owner.eq(user_id))
         .load(&mut db)
         .expect("Error querying database");
@@ -849,10 +1045,9 @@ async fn check_chat_handler(
 
     // get associated chat
     let mut db = db.get().expect("Database not available");
-    let chat = match get_chat_by_user(identity, body.chat, &mut db) {
-        Ok(chat) => chat,
-        Err(err) => return BadRequest(check_chat::Response::Failure(err.into())),
-    };
+    let chat = response_try!(get_chat_by_user(identity, body.chat, &mut db)
+        .map_err(Into::into)
+        .map_err(check_chat::Response::Failure));
 
     // get most recent message timestamp
     let Some(most_recent_message): Option<Message> = messages_dsl::messages
@@ -887,10 +1082,9 @@ async fn list_messages_handler(
 
     // get associated chat
     let mut db = db.get().expect("Database not available");
-    let chat = match get_chat_by_user(identity, body.chat, &mut db) {
-        Ok(chat) => chat,
-        Err(err) => return BadRequest(list_messages::Response::Failure(err.into())),
-    };
+    let chat = response_try!(get_chat_by_user(identity, body.chat, &mut db)
+        .map_err(Into::into)
+        .map_err(list_messages::Response::Failure));
 
     // get messages
     let messages = messages_dsl::messages
@@ -984,6 +1178,7 @@ async fn main() -> std::io::Result<()> {
             .service(me_handler)
             .service(new_chat_handler)
             .service(chat_message_handler)
+            .service(update_chat_handler)
             .service(list_chats_handler)
             .service(check_chat_handler)
             .service(list_messages_handler)

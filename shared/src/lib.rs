@@ -49,43 +49,12 @@ pub mod model {
 
     #[derive(Queryable, Identifiable, Serialize, Deserialize, Clone, Debug, PartialEq)]
     #[diesel(table_name = crate::schema::chats)]
-    pub struct FullChat {
-        pub id: ChatId,
-        pub name: String,
-        pub owner: UserId,
-        pub created: NaiveDateTime,
-        pub context: Vec<Option<i32>>,
-        pub model: String,
-    }
-
-    #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
     pub struct Chat {
         pub id: ChatId,
         pub name: String,
         pub owner: UserId,
         pub created: NaiveDateTime,
         pub model: String,
-    }
-
-    impl From<FullChat> for Chat {
-        fn from(
-            FullChat {
-                id,
-                name,
-                owner,
-                created,
-                model,
-                ..
-            }: FullChat,
-        ) -> Self {
-            Chat {
-                id,
-                name,
-                owner,
-                created,
-                model,
-            }
-        }
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, SqlType, DbEnum)]
@@ -220,6 +189,22 @@ pub mod api {
                 assistant_response: Message,
             },
             Failure(FailureReason),
+        }
+    }
+
+    pub mod update_chat {
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Serialize, Deserialize, Clone, Debug)]
+        pub enum FailureReason {
+            ChatDoesNotExist,
+            ChatNotOwnedByUser,
+        }
+
+        #[derive(Serialize, Deserialize, Clone, Debug)]
+        pub enum Response {
+            Success,
+            Failure(FailureReason)
         }
     }
 

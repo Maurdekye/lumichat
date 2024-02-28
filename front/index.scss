@@ -139,7 +139,6 @@ $sidebar-width: 14em;
   overflow: hidden;
   position: relative;
   
-    
   .sidebar {
     position: absolute;
     display: flex;
@@ -195,6 +194,41 @@ $sidebar-width: 14em;
       height: 4em;
       align-items: center;
       justify-content: center;
+      position: relative;
+
+      button {
+        border: none;
+        padding: 1em;
+        display: flex;
+        flex-flow: row;
+        align-items: center;
+        justify-content: center;
+
+        .icon {
+          width: 1.75em;
+          height: 1.75em;
+          margin-right: 1em;
+        }
+      }
+
+      .modal {
+        position: absolute;
+        display: none;
+        align-items: center;
+        flex-flow: column;
+        z-index: -1;
+        background-color: $secondary;
+        border-radius: 0.8em;
+        transform: translate(0, -100%);
+        box-shadow: 0.1em 0.3em 1.5em rgba($color: black, $alpha: 0.6);
+
+        transition-duration: 0.2s;
+
+        &.open {
+          display: flex;
+          z-index: 20;
+        }
+      }
     }
   }
 
@@ -280,12 +314,24 @@ $sidebar-width: 14em;
             flex-flow: row;
             width: min(60em, calc(100% - 0.6em));
             
-            .message-author {
-              font-weight: 700;
-              font-size: 18px;
+            .author {
+              display: flex;
+              align-items: center;
 
-              &.error {
-                color: $error-text
+              .icon {
+                width: 2em;
+                height: 2em;
+                padding: 0.5em;
+                padding-left: 0;
+              }
+
+              .name {
+                font-weight: 700;
+                font-size: 1.5em;
+  
+                &.error {
+                  color: $error-text
+                }
               }
             }
 
@@ -352,6 +398,20 @@ $sidebar-width: 14em;
 
 }
  
+.divider {
+  &.horizontal {
+    width: 90%;
+    height: 0.1em;
+    background: linear-gradient(to right, 
+      transparent, 
+      $trim 10%, 
+      $trim 90%, 
+      transparent);
+    margin: 0.25em 0;
+    align-self: center;
+  }
+}
+
 button {
   background-color: rgba($color: #000000, $alpha: 0);
   border-radius: 0.1em;

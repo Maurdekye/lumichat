@@ -278,14 +278,57 @@ mod session {
     use gloo_console::{error, log};
     use gloo_net::websocket::futures::WebSocket;
     use shared::{
-        api::{chat_message, list_chats, list_messages, list_models, new_chat},
+        api::{chat_message, list_chats, list_messages, list_models, new_chat, update_chat},
         model::{self, AuthorType, ChatId, MessageId, User},
         websocket,
     };
     use web_sys::HtmlInputElement;
     use yew::prelude::*;
 
-    use crate::{host, JsValuable, RcRefCell};
+    use crate::{host, session::settings::Settings, JsValuable, RcRefCell};
+
+    mod settings {
+        use shared::model::User;
+        use yew::prelude::*;
+
+        pub enum Msg {
+            Close,
+        }
+
+        #[derive(Clone, PartialEq, Properties)]
+        pub struct Props {
+            pub user: User,
+            pub on_close: Callback<()>,
+        }
+
+        pub struct Settings {}
+
+        impl Component for Settings {
+            type Message = Msg;
+
+            type Properties = Props;
+
+            fn create(_ctx: &Context<Self>) -> Self {
+                Self {}
+            }
+
+            fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
+                match msg {
+                    Msg::Close => ctx.props().on_close.emit(()),
+                }
+                true
+            }
+
+            fn view(&self, ctx: &Context<Self>) -> Html {
+                html! {
+                    <>
+                        <div class="settings">{"Settings go here (eventually)"}</div>
+                        <button onclick={ctx.link().callback(|_| Msg::Close)}>{"Go back"}</button>
+                    </>
+                }
+            }
+        }
+    }
 
     type ElemKey = u64;
 
@@ -435,11 +478,25 @@ mod session {
         models: Vec<String>,
     }
 
+    #[derive(Debug)]
+    pub enum MainView {
+        NewChat,
+        Settings,
+        Chat(Rc<RefCell<Chat>>),
+    }
+
+    impl Default for MainView {
+        fn default() -> Self {
+            Self::NewChat
+        }
+    }
+
     #[derive(Default)]
     pub struct Session {
         sidebar_collapsed: bool,
+        profile_modal: bool,
         chats: Loadable<Chats>,
-        current_chat: Option<Rc<RefCell<Chat>>>,
+        current_chat: MainView,
         message_input: String,
         websocket: Loadable<WebsocketWriter>,
         model_selection: Loadable<ModelSelection>,
@@ -453,6 +510,9 @@ mod session {
         UpdateMessage(String),
         SubmitMessage,
         SelectModel(String),
+        OpenSettings,
+        CloseSetting,
+        ProfileModal(bool),
         ChatMessageResponse {
             chat: Rc<RefCell<Chat>>,
             response: chat_message::Response,
@@ -488,6 +548,9 @@ mod session {
                 Self::UpdateMessage(arg0) => f.debug_tuple("UpdateMessage").field(arg0).finish(),
                 Self::SubmitMessage => write!(f, "SubmitMessage"),
                 Self::SelectModel(arg0) => f.debug_tuple("SelectModel").field(arg0).finish(),
+                Self::OpenSettings => f.debug_tuple("OpenSettings").finish(),
+                Self::CloseSetting => f.debug_tuple("CloseSetting").finish(),
+                Self::ProfileModal(arg0) => f.debug_tuple("ProfileModal").field(arg0).finish(),
                 Self::ChatMessageResponse {
                     chat,
                     response,
@@ -555,7 +618,7 @@ mod session {
                     self.sidebar_collapsed = !self.sidebar_collapsed;
                 }
                 Msg::NewChat => {
-                    self.current_chat = None;
+                    self.current_chat = MainView::NewChat;
                     if let Loaded(model_selection) = &mut self.model_selection {
                         model_selection.selected = model_selection.default.clone();
                     }
@@ -566,7 +629,7 @@ mod session {
                             model_selection.selected = real_chat.chat.model.clone();
                         }
                     }
-                    self.current_chat = Some(chat);
+                    self.current_chat = MainView::Chat(chat);
                 }
                 Msg::UpdateMessage(message) => {
                     self.message_input = message;
@@ -574,7 +637,7 @@ mod session {
                 Msg::SubmitMessage => {
                     let content = mem::replace(&mut self.message_input, String::new());
                     match &self.current_chat {
-                        Some(chat) => {
+                        MainView::Chat(chat) => {
                             let user_message_key: ElemKey = rand::random();
 
                             let ChatContent::Real(real_chat) = &mut RefCell::borrow_mut(chat).inner
@@ -615,7 +678,7 @@ mod session {
                                 }
                             });
                         }
-                        None => {
+                        MainView::NewChat => {
                             let Loaded(loaded_chats) = &mut self.chats else {
                                 error!("Chats aren't loaded yet");
                                 return false;
@@ -634,7 +697,7 @@ mod session {
                                 },
                             });
                             loaded_chats.chat_list.push(new_chat_skeleton.clone());
-                            self.current_chat = Some(new_chat_skeleton);
+                            self.current_chat = MainView::Chat(new_chat_skeleton);
                             let model = model_selection.selected.clone();
                             ctx.link().send_future(async move {
                                 let response: new_chat::Response = json!(post!(
@@ -651,6 +714,10 @@ mod session {
                                 }
                             });
                         }
+                        MainView::Settings => {
+                            error!("Can't send a message from the settings page!");
+                            return false;
+                        }
                     }
                 }
                 Msg::SelectModel(model) => {
@@ -658,7 +725,33 @@ mod session {
                         error!("Can't select a model before models are loaded");
                         return false;
                     };
+                    'chat_update: {
+                        let MainView::Chat(chat) = &self.current_chat else {
+                            break 'chat_update;
+                        };
+                        let ChatContent::Real(real_chat) = &mut RefCell::borrow_mut(chat).inner
+                        else {
+                            break 'chat_update;
+                        };
+                        real_chat.chat.model = model.clone();
+                        let chat = real_chat.chat.clone();
+                        wasm_bindgen_futures::spawn_local(async move {
+                            let response: update_chat::Response =
+                                json!(post!("/update-chat", chat));
+                            assert!(matches!(response, update_chat::Response::Success));
+                        })
+                    }
                     model_selection.selected = model;
+                }
+                Msg::OpenSettings => {
+                    self.current_chat = MainView::Settings;
+                    self.profile_modal = false;
+                }
+                Msg::CloseSetting => {
+                    self.current_chat = MainView::NewChat;
+                }
+                Msg::ProfileModal(open) => {
+                    self.profile_modal = open;
                 }
                 Msg::ChatMessageResponse {
                     chat,
@@ -744,7 +837,7 @@ mod session {
                         inner: ChatContent::Real(real_chat),
                     };
                     let new_chat = RcRefCell::new(new_chat);
-                    self.current_chat = Some(new_chat.clone());
+                    self.current_chat = MainView::Chat(new_chat.clone());
                     loaded_chats.chat_list.push(new_chat.clone());
                     loaded_chats.chat_index.insert(chat_id, new_chat.clone());
                     loaded_chats
@@ -1009,7 +1102,7 @@ mod session {
             }
 
             // attempt to load messages for current chat
-            if let Some(chat) = &self.current_chat {
+            if let MainView::Chat(chat) = &self.current_chat {
                 let chat_borrow = RefCell::borrow(chat);
                 if let ChatContent::Real(real_chat) = &chat_borrow.inner {
                     if matches!(real_chat.messages, Unloaded) {
@@ -1018,16 +1111,20 @@ mod session {
                 }
             }
 
-            log!(format!("model selection: {:#?}", &self.model_selection));
+            // log!(format!("model selection: {:#?}", &self.model_selection));
 
             // render page
-            let input_disabled = self.current_chat.as_ref().is_some_and(|c| !RefCell::borrow(c).is_available());
+            let input_disabled = match &self.current_chat {
+                MainView::Chat(chat) => !RefCell::borrow(chat).is_available(),
+                _ => false,
+            };
             html! {
-                <div class="session">
+                <div class="session" onclick={ctx.link().callback(|_| Msg::ProfileModal(false))}>
                     <div class="sidebar">
                         <div class="new-chat">
                             <button onclick={ctx.link().callback(|_| Msg::NewChat)}>{" + New Chat"}</button>
                         </div>
+                        <div class="horizontal divider"></div>
                         <div class="chats-list scrollable">
                             {
                                 match &self.chats {
@@ -1040,7 +1137,10 @@ mod session {
                                             let chat = chat.clone();
                                             ctx.link().callback(move |_| Msg::SelectChat(chat.clone()))
                                         };
-                                        let selected = self.current_chat.as_ref().is_some_and(|current| Rc::ptr_eq(chat, current));
+                                        let selected = match &self.current_chat {
+                                            MainView::Chat(current) => Rc::ptr_eq(chat, current),
+                                            _ => false
+                                        };
                                         let chat = RefCell::borrow(chat);
                                         let key = chat.key;
                                         html! {
@@ -1050,8 +1150,24 @@ mod session {
                                 }
                             }
                         </div>
+                        <div class="horizontal divider"></div>
                         <div class="profile">
-                            <button onclick={ctx.link().callback(|_| Msg::Logout)}>{"Logout"}</button>
+                            <button onclick={
+                                let new_profile_modal = !self.profile_modal;
+                                ctx.link().callback(move |e: MouseEvent| {
+                                    e.prevent_default();
+                                    e.stop_propagation();
+                                    e.stop_immediate_propagation();
+                                    Msg::ProfileModal(new_profile_modal)
+                                })
+                            }>
+                                <img class="icon" src="./static/user_icon.svg" />
+                                <span class="name">{ctx.props().user.username.clone()}</span>
+                            </button>
+                            <div class={classes!("modal", self.profile_modal.then_some("open"))}>
+                                <button onclick={ctx.link().callback(|_| Msg::OpenSettings)}>{"Settings"}</button>
+                                <button onclick={ctx.link().callback(|_| Msg::Logout)}>{"Logout"}</button>
+                            </div>
                         </div>
                     </div>
                     <div class="chat-layer">
@@ -1061,122 +1177,134 @@ mod session {
                                 <button onclick={ctx.link().callback(|_| Msg::ToggleSidebar)}>{if self.sidebar_collapsed { ">" } else { "<" }}</button>
                             </div>
                             <div class="chat-window">
-                                <div class="model-selection-header">
-                                    {
-                                        match &self.model_selection {
-                                            Unloaded | Loading => html! { <></> },
-                                            Loaded(model_selection) => html! {
-                                                <select class="model-selector" 
-                                                    onchange={ctx.link().callback(|event: Event| {
-                                                        let input: HtmlInputElement = event.target_unchecked_into();
-                                                        Msg::SelectModel(input.value())
-                                                    })}>
+                                {
+                                    match &self.current_chat {
+                                        MainView::Settings => {
+                                            let user = ctx.props().user.clone();
+                                            let on_close = ctx.link().callback(|_| Msg::CloseSetting);
+                                            html! {
+                                                <Settings {user} {on_close} />
+                                            }
+                                        }
+                                        _ => html! {
+                                            <>
+                                                <div class="model-selection-header">
                                                     {
-                                                        for model_selection.models.iter().map(|model| html! {
-                                                            <option value={model.clone()} selected={model == &model_selection.selected}>{model}</option>
-                                                        })
-                                                    }
-                                                </select>
-                                            }
-                                        }
-                                    }
-                                </div>
-                                {{
-                                    fn render_message(author: String, author_name: &str, content: &str, key: u64) -> Html {
-                                        html! {
-                                            <div {key} class={classes!("message-row", author)}>
-                                                <div class="message-author">{author_name}</div>
-                                                <div class="message">{content}</div>
-                                            </div>
-                                        }
-                                    }
-
-                                    fn render_error(author_name: &str, error: &str, key: u64) -> Html {
-                                        html! {
-                                            <div {key} class={classes!("message-row", "assistant", "error")}>
-                                                <div class="message-author error">{author_name}</div>
-                                                <div class="message error">{error}</div>
-                                            </div>
-                                        }
-                                    }
-
-                                    if let Some(chat) = &self.current_chat {
-                                        let chat = RefCell::borrow(chat);
-                                        let messages: Html = match &chat.inner {
-                                            ChatContent::Skeleton { user_message, user_message_key } => {
-                                                render_message("user".to_string(), &ctx.props().user.username, &user_message, *user_message_key)
-                                            }
-                                            ChatContent::Real(real_chat) => {
-                                                match &real_chat.messages {
-                                                    Unloaded | Loading => html! {
-                                                        <div class="loading-messages"></div>
-                                                    },
-                                                    Loaded(loaded_messages) =>
-                                                        loaded_messages.message_list.iter().map(|message| {
-                                                            let message = &*RefCell::borrow(message);
-                                                            let key = message.key;
-                                                            match &message.inner {
-                                                                MessageContent::Skeleton { content } => render_message("user".to_string(), &ctx.props().user.username, &content, key),
-                                                                MessageContent::Real(message) => {
-                                                                    match message.author {
-                                                                        AuthorType::User => render_message("user".to_string(), &*ctx.props().user.username, &message.content, key),
-                                                                        AuthorType::AssistantResponding
-                                                                        | AuthorType::AssistantFinished => render_message("assistant".to_string(), "Assistant", &message.content, key),
-                                                                        AuthorType::AssistantError => render_error("Assistant", &*message.error.as_ref().unwrap_or(&String::new()), key)
+                                                        match &self.model_selection {
+                                                            Unloaded | Loading => html! { <></> },
+                                                            Loaded(model_selection) => html! {
+                                                                <select class="model-selector"
+                                                                    onchange={ctx.link().callback(|event: Event| {
+                                                                        let input: HtmlInputElement = event.target_unchecked_into();
+                                                                        Msg::SelectModel(input.value())
+                                                                    })}>
+                                                                    {
+                                                                        for model_selection.models.iter().map(|model| html! {
+                                                                            <option value={model.clone()} selected={model == &model_selection.selected}>{model}</option>
+                                                                        })
                                                                     }
-                                                                },
+                                                                </select>
                                                             }
-                                                        }).collect::<Html>(),
-                                                }
-                                            },
-                                        };
-                                        html! {
-                                            <div class="chat-messages scrollable">{messages}</div>
-                                        }
-                                    } else {
-                                        html! {
-                                            <div class="main-page">
-                                                <img class="logo" src="./static/logo.svg"/>
-                                                <h2 class="by-line">{"How can I illuminate your day?"}</h2>
-                                            </div>
+                                                        }
+                                                    }
+                                                </div>
+                                                {{
+                                                    fn render_message(author: String, author_name: &str, content: &str, key: u64, error: bool) -> Html {
+                                                        let profile_icon = match &*author {
+                                                            "assistant" => "./static/logo.svg",
+                                                            "user" | _ => "./static/user_icon.svg",
+                                                        };
+                                                        let error = error.then_some("error");
+                                                        html! {
+                                                            <div {key} class={classes!("message-row", author, error)}>
+                                                                <div class={classes!("author", error)}>
+                                                                    <img class="icon" src={profile_icon}/>
+                                                                    <span class={classes!("name", error)}>{author_name}</span>
+                                                                </div>
+                                                                <div class={classes!("message", error)}>{content}</div>
+                                                            </div>
+                                                        }
+                                                    }
+
+                                                    if let MainView::Chat(chat) = &self.current_chat {
+                                                        let chat = RefCell::borrow(chat);
+                                                        let messages: Html = match &chat.inner {
+                                                            ChatContent::Skeleton { user_message, user_message_key } => {
+                                                                render_message("user".to_string(), &ctx.props().user.username, &user_message, *user_message_key, false)
+                                                            }
+                                                            ChatContent::Real(real_chat) => {
+                                                                match &real_chat.messages {
+                                                                    Unloaded | Loading => html! {
+                                                                        <div class="loading-messages"></div>
+                                                                    },
+                                                                    Loaded(loaded_messages) =>
+                                                                        loaded_messages.message_list.iter().map(|message| {
+                                                                            let message = &*RefCell::borrow(message);
+                                                                            let key = message.key;
+                                                                            match &message.inner {
+                                                                                MessageContent::Skeleton { content } => render_message("user".to_string(), &ctx.props().user.username, &content, key, false),
+                                                                                MessageContent::Real(message) => {
+                                                                                    match message.author {
+                                                                                        AuthorType::User => render_message("user".to_string(), &*ctx.props().user.username, &message.content, key, false),
+                                                                                        AuthorType::AssistantResponding
+                                                                                        | AuthorType::AssistantFinished => render_message("assistant".to_string(), "Assistant", &message.content, key, false),
+                                                                                        AuthorType::AssistantError => render_message("assistant".to_string(), "Assistant", &*message.error.as_ref().unwrap_or(&String::new()), key, true)
+                                                                                    }
+                                                                                },
+                                                                            }
+                                                                        }).collect::<Html>(),
+                                                                }
+                                                            },
+                                                        };
+                                                        html! {
+                                                            <div class="chat-messages scrollable">{messages}</div>
+                                                        }
+                                                    } else {
+                                                        html! {
+                                                            <div class="main-page">
+                                                                <img class="logo" src="./static/logo.svg"/>
+                                                                <h2 class="by-line">{"How can I illuminate your day?"}</h2>
+                                                            </div>
+                                                        }
+                                                    }
+                                                }}
+                                                <div class="chat-input-container">
+                                                    <textarea class="chat-input"
+                                                        rows={(self.message_input.chars().filter(|c| *c == '\n').count() + 1).min(24).to_string()}
+                                                        disabled={input_disabled}
+                                                        oninput={ctx.link().callback(|e: InputEvent| {
+                                                            let input: HtmlInputElement = e.target_unchecked_into();
+                                                            Msg::UpdateMessage(input.value())
+                                                        })}
+                                                        onkeypress={
+                                                            let message_input = self.message_input.clone();
+                                                            ctx.link().batch_callback(move |e: KeyboardEvent| {
+                                                            if e.key() == "Enter" && !e.shift_key() {
+                                                                e.prevent_default();
+                                                                if !message_input.is_empty() {
+                                                                    return Some(Msg::SubmitMessage)
+                                                                }
+                                                            }
+                                                            None
+                                                        })}
+                                                        value={self.message_input.clone()}
+                                                    ></textarea>
+                                                    <div class="submit-message"
+                                                        disabled={input_disabled}
+                                                        onclick={
+                                                            let message_input = self.message_input.clone();
+                                                            ctx.link().batch_callback(move |_| {
+                                                                (!message_input.is_empty()).then_some(Msg::SubmitMessage)
+                                                            })
+                                                        }
+                                                    >
+                                                        <img src={"./static/submit_message.svg"} />
+                                                    </div>
+                                                </div>
+                                            </>
                                         }
                                     }
-                                }}
-                                <div class="chat-input-container">
-                                    <textarea class="chat-input"
-                                        rows={(self.message_input.chars().filter(|c| *c == '\n').count() + 1).min(24).to_string()}
-                                        disabled={input_disabled}
-                                        oninput={ctx.link().callback(|e: InputEvent| {
-                                            let input: HtmlInputElement = e.target_unchecked_into();
-                                            Msg::UpdateMessage(input.value())
-                                        })}
-                                        onkeypress={
-                                            let message_input = self.message_input.clone();
-                                            ctx.link().batch_callback(move |e: KeyboardEvent| {
-                                            if e.key() == "Enter" && !e.shift_key() {
-                                                e.prevent_default();
-                                                if !message_input.is_empty() {
-                                                    return Some(Msg::SubmitMessage)
-                                                }
-                                            }
-                                            None
-                                        })}
-                                        value={self.message_input.clone()}
-                                    ></textarea>
-                                    <div class="submit-message" 
-                                        disabled={input_disabled}
-                                        onclick={
-                                            let message_input = self.message_input.clone();
-                                            ctx.link().batch_callback(move |_| {
-                                                (!message_input.is_empty()).then_some(Msg::SubmitMessage)
-                                            })
-                                        }
-                                    >
-                                        <svg width="40" height="40" viewBox="0 20 60 60" xmlns="http://www.w3.org/2000/svg">
-                                            <path d="M 30,50 L 10,70 L 50,50 L 10,30 L 30,50 L 10,70" stroke="rgb(196, 196, 196)" fill="transparent" stroke-width="5"></path>
-                                        </svg>
-                                    </div>
-                                </div>
+                                }
                             </div>
                         </div>
                     </div>
