@@ -33,6 +33,14 @@ diesel::table! {
 }
 
 diesel::table! {
+    settings (scope, key) {
+        scope -> Varchar,
+        key -> Varchar,
+        value -> Varchar,
+    }
+}
+
+diesel::table! {
     users (id) {
         id -> Int4,
         username -> Varchar,
@@ -48,5 +56,6 @@ diesel::joinable!(messages -> chats (chat));
 diesel::allow_tables_to_appear_in_same_query!(
     chats,
     messages,
+    settings,
     users,
 );

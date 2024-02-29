@@ -326,6 +326,152 @@ mod ollama {
     }
 }
 
+mod settings {
+    use std::{error::Error, str::FromStr};
+
+    use diesel::insert_into;
+    use diesel::prelude::*;
+    use shared::{model::UserId, schema::settings};
+
+    use crate::Database;
+
+    #[derive(Clone, PartialEq, Eq)]
+    pub enum Scope {
+        Default,
+        Global,
+        Model(String),
+        User(UserId),
+        UserModel(UserId, String),
+    }
+
+    impl Scope {
+        fn up(self) -> Self {
+            match self {
+                Scope::Default => Scope::Default,
+                Scope::Global => Scope::Default,
+                Scope::Model(_) => Scope::Global,
+                Scope::User(_) => Scope::Global,
+                Scope::UserModel(_, model) => Scope::Model(model),
+            }
+        }
+
+        fn key(&self) -> String {
+            match self {
+                Scope::Default => unimplemented!("Default scope is never stored"),
+                Scope::Global => format!("GLOBAL"),
+                Scope::Model(model) => format!("MODEL#{model}"),
+                Scope::User(user_id) => format!("USER#{user_id}"),
+                Scope::UserModel(user_id, model) => format!("USER#{user_id}#MODEL#{model}"),
+            }
+        }
+    }
+
+    #[derive(Insertable, AsChangeset)]
+    #[diesel(table_name = shared::schema::settings)]
+    pub struct NewSetting<'a> {
+        pub scope: &'a str,
+        pub key: &'a str,
+        pub value: &'a str,
+    }
+
+    #[derive(Clone)]
+    struct Setting<T: Clone> {
+        key: String,
+        default: T,
+        db: Database,
+    }
+
+    impl<T: Clone> Setting<T> {
+        fn get(&self, mut scope: Scope) -> T
+        where
+            T: Clone + FromStr,
+            T::Err: Error,
+        {
+            let mut db = self.db.get().expect("Error connecting to database");
+            while scope != Scope::Default {
+                let value: Option<String> = settings::dsl::settings
+                    .select(settings::dsl::value)
+                    .filter(settings::dsl::scope.eq(scope.key()))
+                    .filter(settings::dsl::key.eq(&self.key))
+                    .first(&mut db)
+                    .optional()
+                    .expect("Unable to query database");
+                if let Some(value) = value {
+                    let value: T = value.parse().unwrap_or_else(|e| {
+                        panic!(
+                            "Unable to parse setting value {} '{}': {}",
+                            scope.key(),
+                            &self.key,
+                            e
+                        )
+                    });
+                    return value;
+                }
+                scope = scope.up();
+            }
+            self.default.clone()
+        }
+
+        fn set(&self, scope: Scope, value: T)
+        where
+            T: ToString,
+        {
+            let mut db = self.db.get().expect("Error connecting to database");
+            let new_setting = NewSetting {
+                scope: &scope.key(),
+                key: &self.key,
+                value: &value.to_string(),
+            };
+            insert_into(settings::dsl::settings)
+                .values(&new_setting)
+                .on_conflict((settings::dsl::scope, settings::dsl::key))
+                .do_update()
+                .set(&new_setting)
+                .execute(&mut db)
+                .expect("Error updating database");
+        }
+    }
+
+    macro_rules! settings {
+        (
+            type Database = $database:ty;
+            struct $settings_struct:ident ($(
+                $name:ident: $typ:ty = $default:expr,
+            )*)
+        ) => {
+            #[derive(Clone)]
+            pub struct $settings_struct {
+                $(
+                    $name: $crate::settings::Setting<$typ>,
+                )*
+            }
+
+            impl $settings_struct {
+                pub fn new(db: $database) -> Self {
+                    Self {
+                        $(
+                            $name: $crate::settings::Setting {
+                                key: stringify!($name).into(),
+                                default: $default.into(),
+                                db: db.clone(),
+                            },
+                        )*
+                    }
+                }
+            }
+        };
+    }
+
+    settings! {
+        type Database = Database;
+        struct Settings (
+            temperature: f64 = 1.0,
+            context_length: u64 = 4096u64,
+            system_message: String = "",
+        )
+    }
+}
+
 type Database = r2d2::Pool<ConnectionManager<PgConnection>>;
 type DatabaseConnection = r2d2::PooledConnection<ConnectionManager<PgConnection>>;
 
@@ -338,6 +484,8 @@ enum Response<T> {
     BadRequest(T),
     Unauthorized,
 }
+
+use crate::settings::Settings;
 
 use self::Response::*;
 
@@ -1151,12 +1299,13 @@ async fn main() -> std::io::Result<()> {
     let redis = RedisSessionStore::new(redis_url).await.unwrap();
     println!("Connected to redis");
 
-    // initialize app state & config
+    // initialize app state, settings & config
     let state = State::default();
     let config = Config {
         admin_signup,
         llm_api_url,
     };
+    let settings = Settings::new(pool.clone());
 
     // serve app
     println!("Running on {}", host_addr);
@@ -1165,6 +1314,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(Data::new(pool.clone()))
             .app_data(Data::new(state.clone()))
             .app_data(Data::new(config.clone()))
+            .app_data(Data::new(settings.clone()))
             .wrap(IdentityMiddleware::default())
             .wrap(SessionMiddleware::new(
                 redis.clone(),

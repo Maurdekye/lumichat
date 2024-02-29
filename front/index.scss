@@ -392,6 +392,24 @@ $sidebar-width: 14em;
             height: 10em;
           }
         }
+
+        .settings {
+          padding: 2em;
+          display: flex;
+          flex-flow: column;
+
+          .header {
+
+            button {
+              margin: 1em;
+              padding: 0.4em;
+            }
+          }
+
+          .user, .admin {
+            
+          }
+        }
       }
     }
   }

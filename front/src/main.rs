@@ -291,8 +291,16 @@ mod session {
         use shared::model::User;
         use yew::prelude::*;
 
+        #[derive(Default)]
+        pub enum Page {
+            #[default]
+            User,
+            Admin,
+        }
+
         pub enum Msg {
-            Close,
+            Back,
+            Navigate(Page),
         }
 
         #[derive(Clone, PartialEq, Properties)]
@@ -301,7 +309,10 @@ mod session {
             pub on_close: Callback<()>,
         }
 
-        pub struct Settings {}
+        #[derive(Default)]
+        pub struct Settings {
+            page: Page,
+        }
 
         impl Component for Settings {
             type Message = Msg;
@@ -309,22 +320,57 @@ mod session {
             type Properties = Props;
 
             fn create(_ctx: &Context<Self>) -> Self {
-                Self {}
+                Self::default()
             }
 
             fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
                 match msg {
-                    Msg::Close => ctx.props().on_close.emit(()),
+                    Msg::Back => {
+                        self.page = match &self.page {
+                            Page::User => {
+                                ctx.props().on_close.emit(());
+                                return true;
+                            }
+                            Page::Admin => Page::User,
+                        };
+                    }
+                    Msg::Navigate(page) => self.page = page,
                 }
                 true
             }
 
             fn view(&self, ctx: &Context<Self>) -> Html {
                 html! {
-                    <>
-                        <div class="settings">{"Settings go here (eventually)"}</div>
-                        <button onclick={ctx.link().callback(|_| Msg::Close)}>{"Go back"}</button>
-                    </>
+                    <div class="settings">
+                        <div class="header">
+                            <button class="back" onclick={ctx.link().callback(|_| Msg::Back)}>{"Back"}</button>
+                        </div>
+                        {
+                            match &self.page {
+                                Page::User => {
+                                    html! {
+                                        <div class="user">
+                                            <h2>{"User Settings Go Here"}</h2>
+                                            {
+                                                ctx.props().user.admin.then_some(html! {
+                                                    <button class="go-to-admin" onclick={ctx.link().callback(|_| Msg::Navigate(Page::Admin))}>
+                                                        {"Admin Settings"}
+                                                    </button>
+                                                })
+                                            }
+                                        </div>
+                                    }
+                                }
+                                Page::Admin => {
+                                    html! {
+                                        <div class="admin">
+                                            <h2>{"Admin Settings Go Here"}</h2>
+                                        </div>
+                                    }
+                                }
+                            }
+                        }
+                    </div>
                 }
             }
         }
@@ -334,20 +380,15 @@ mod session {
 
     type WebsocketWriter = SplitSink<WebSocket, gloo_net::websocket::Message>;
 
-    #[derive(Debug)]
+    #[derive(Debug, Default)]
     pub enum Loadable<T> {
+        #[default]
         Unloaded,
         Loading,
         Loaded(T),
     }
 
     use self::Loadable::*;
-
-    impl<T> Default for Loadable<T> {
-        fn default() -> Self {
-            Unloaded
-        }
-    }
 
     #[derive(Debug)]
     pub enum MessageContent {
@@ -478,17 +519,12 @@ mod session {
         models: Vec<String>,
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Default)]
     pub enum MainView {
+        #[default]
         NewChat,
         Settings,
         Chat(Rc<RefCell<Chat>>),
-    }
-
-    impl Default for MainView {
-        fn default() -> Self {
-            Self::NewChat
-        }
     }
 
     #[derive(Default)]
@@ -496,7 +532,7 @@ mod session {
         sidebar_collapsed: bool,
         profile_modal: bool,
         chats: Loadable<Chats>,
-        current_chat: MainView,
+        main_view: MainView,
         message_input: String,
         websocket: Loadable<WebsocketWriter>,
         model_selection: Loadable<ModelSelection>,
@@ -618,7 +654,7 @@ mod session {
                     self.sidebar_collapsed = !self.sidebar_collapsed;
                 }
                 Msg::NewChat => {
-                    self.current_chat = MainView::NewChat;
+                    self.main_view = MainView::NewChat;
                     if let Loaded(model_selection) = &mut self.model_selection {
                         model_selection.selected = model_selection.default.clone();
                     }
@@ -629,14 +665,14 @@ mod session {
                             model_selection.selected = real_chat.chat.model.clone();
                         }
                     }
-                    self.current_chat = MainView::Chat(chat);
+                    self.main_view = MainView::Chat(chat);
                 }
                 Msg::UpdateMessage(message) => {
                     self.message_input = message;
                 }
                 Msg::SubmitMessage => {
                     let content = mem::replace(&mut self.message_input, String::new());
-                    match &self.current_chat {
+                    match &self.main_view {
                         MainView::Chat(chat) => {
                             let user_message_key: ElemKey = rand::random();
 
@@ -697,7 +733,7 @@ mod session {
                                 },
                             });
                             loaded_chats.chat_list.push(new_chat_skeleton.clone());
-                            self.current_chat = MainView::Chat(new_chat_skeleton);
+                            self.main_view = MainView::Chat(new_chat_skeleton);
                             let model = model_selection.selected.clone();
                             ctx.link().send_future(async move {
                                 let response: new_chat::Response = json!(post!(
@@ -726,7 +762,7 @@ mod session {
                         return false;
                     };
                     'chat_update: {
-                        let MainView::Chat(chat) = &self.current_chat else {
+                        let MainView::Chat(chat) = &self.main_view else {
                             break 'chat_update;
                         };
                         let ChatContent::Real(real_chat) = &mut RefCell::borrow_mut(chat).inner
@@ -744,11 +780,11 @@ mod session {
                     model_selection.selected = model;
                 }
                 Msg::OpenSettings => {
-                    self.current_chat = MainView::Settings;
+                    self.main_view = MainView::Settings;
                     self.profile_modal = false;
                 }
                 Msg::CloseSetting => {
-                    self.current_chat = MainView::NewChat;
+                    self.main_view = MainView::NewChat;
                 }
                 Msg::ProfileModal(open) => {
                     self.profile_modal = open;
@@ -837,7 +873,7 @@ mod session {
                         inner: ChatContent::Real(real_chat),
                     };
                     let new_chat = RcRefCell::new(new_chat);
-                    self.current_chat = MainView::Chat(new_chat.clone());
+                    self.main_view = MainView::Chat(new_chat.clone());
                     loaded_chats.chat_list.push(new_chat.clone());
                     loaded_chats.chat_index.insert(chat_id, new_chat.clone());
                     loaded_chats
@@ -1102,7 +1138,7 @@ mod session {
             }
 
             // attempt to load messages for current chat
-            if let MainView::Chat(chat) = &self.current_chat {
+            if let MainView::Chat(chat) = &self.main_view {
                 let chat_borrow = RefCell::borrow(chat);
                 if let ChatContent::Real(real_chat) = &chat_borrow.inner {
                     if matches!(real_chat.messages, Unloaded) {
@@ -1114,7 +1150,7 @@ mod session {
             // log!(format!("model selection: {:#?}", &self.model_selection));
 
             // render page
-            let input_disabled = match &self.current_chat {
+            let input_disabled = match &self.main_view {
                 MainView::Chat(chat) => !RefCell::borrow(chat).is_available(),
                 _ => false,
             };
@@ -1137,7 +1173,7 @@ mod session {
                                             let chat = chat.clone();
                                             ctx.link().callback(move |_| Msg::SelectChat(chat.clone()))
                                         };
-                                        let selected = match &self.current_chat {
+                                        let selected = match &self.main_view {
                                             MainView::Chat(current) => Rc::ptr_eq(chat, current),
                                             _ => false
                                         };
@@ -1178,7 +1214,7 @@ mod session {
                             </div>
                             <div class="chat-window">
                                 {
-                                    match &self.current_chat {
+                                    match &self.main_view {
                                         MainView::Settings => {
                                             let user = ctx.props().user.clone();
                                             let on_close = ctx.link().callback(|_| Msg::CloseSetting);
@@ -1226,7 +1262,7 @@ mod session {
                                                         }
                                                     }
 
-                                                    if let MainView::Chat(chat) = &self.current_chat {
+                                                    if let MainView::Chat(chat) = &self.main_view {
                                                         let chat = RefCell::borrow(chat);
                                                         let messages: Html = match &chat.inner {
                                                             ChatContent::Skeleton { user_message, user_message_key } => {
