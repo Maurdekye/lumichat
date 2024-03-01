@@ -1,1 +1,1 @@
-DROP TABLE IF EXISTS Settings;
+DROP TABLE IF EXISTS ModelSettings;

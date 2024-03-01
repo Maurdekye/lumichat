@@ -2,7 +2,8 @@ pub mod schema;
 
 pub mod model {
     use chrono::NaiveDateTime;
-    use diesel::{deserialize::Queryable, sql_types::SqlType, Identifiable};
+    use diesel::prelude::*;
+    use diesel::SqlType;
     use diesel_derive_enum::DbEnum;
     use serde::{Deserialize, Serialize};
 
@@ -10,6 +11,7 @@ pub mod model {
 
     #[derive(Queryable, Identifiable, Serialize, Deserialize, Clone, Debug)]
     #[diesel(table_name = crate::schema::users)]
+    #[diesel(check_for_backend(diesel::pg::Pg))]
     pub struct FullUser {
         pub id: UserId,
         pub username: String,
@@ -47,8 +49,11 @@ pub mod model {
 
     pub type ChatId = i32;
 
-    #[derive(Queryable, Identifiable, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    #[derive(
+        Queryable, Identifiable, AsChangeset, Serialize, Deserialize, Clone, Debug, PartialEq,
+    )]
     #[diesel(table_name = crate::schema::chats)]
+    #[diesel(check_for_backend(diesel::pg::Pg))]
     pub struct Chat {
         pub id: ChatId,
         pub name: String,
@@ -70,6 +75,7 @@ pub mod model {
 
     #[derive(Queryable, Identifiable, Serialize, Deserialize, Clone, Debug, PartialEq)]
     #[diesel(table_name = crate::schema::messages)]
+    #[diesel(check_for_backend(diesel::pg::Pg))]
     pub struct Message {
         pub id: MessageId,
         pub chat: ChatId,
@@ -77,6 +83,25 @@ pub mod model {
         pub content: String,
         pub error: Option<String>,
         pub created: NaiveDateTime,
+    }
+
+    #[derive(Queryable, Selectable, AsChangeset, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    #[diesel(table_name = crate::schema::modelsettings)]
+    #[diesel(check_for_backend(diesel::pg::Pg))]
+    pub struct ModelSettings {
+        pub temperature: f64,
+        pub context_length: i32,
+        pub system_prompt: Option<String>,
+    }
+
+    impl Default for ModelSettings {
+        fn default() -> Self {
+            Self {
+                temperature: 0.8,
+                context_length: 4096,
+                system_prompt: None,
+            }
+        }
     }
 }
 
@@ -204,7 +229,7 @@ pub mod api {
         #[derive(Serialize, Deserialize, Clone, Debug)]
         pub enum Response {
             Success,
-            Failure(FailureReason)
+            Failure(FailureReason),
         }
     }
 
@@ -276,6 +301,47 @@ pub mod api {
         pub struct Response {
             pub list: Vec<String>,
             pub default: String,
+        }
+    }
+
+    pub mod model_settings {
+
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Serialize, Deserialize, Clone, Debug)]
+        pub enum SettingsType {
+            Default,
+            Model(String),
+        }
+
+        #[derive(Serialize, Deserialize, Clone, Debug)]
+        pub enum Scope {
+            My(SettingsType),
+            Global(SettingsType),
+        }
+
+        pub mod get {
+            pub type Request = super::Scope;
+
+            pub type Response = crate::model::ModelSettings;
+        }
+
+        pub mod set {
+            use serde::{Deserialize, Serialize};
+
+            #[derive(Serialize, Deserialize, Clone, Debug)]
+            pub struct Request {
+                pub scope: super::Scope,
+                pub settings: crate::model::ModelSettings,
+            }
+
+            pub type Response = ();
+        }
+
+        pub mod clear {
+            pub type Request = super::Scope;
+
+            pub type Response = ();
         }
     }
 }

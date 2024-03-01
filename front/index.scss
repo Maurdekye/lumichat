@@ -293,10 +293,7 @@ $sidebar-width: 14em;
           align-items: center;
 
           .model-selector {
-            background-color: $primary;
-            border: none;
             font-size: large;
-            padding: 0.8em;
           }
         }
     
@@ -407,7 +404,43 @@ $sidebar-width: 14em;
           }
 
           .user, .admin {
-            
+            .settings-form {
+              display: grid;
+              gap: 0.5em;
+
+              label {
+                grid-column: 1;
+              }
+
+              .setting-input {
+                grid-column: 2;
+              }
+
+              label[for=temperature], #temperature {
+                grid-row: 1;
+              }
+
+              label[for=context_length], #context_length {
+                grid-row: 2;
+              }
+
+              label[for=system_prompt], #system_prompt {
+                grid-row: 3;
+              }
+
+              button {
+                grid-row: 4;
+
+                &.save {
+                  grid-column: 1;
+                }
+
+                *.clear {
+                  grid-column: 2;
+                }
+              }
+              
+            }
           }
         }
       }
@@ -458,4 +491,10 @@ input, textarea {
   &:focus {
     border-color: $trim-light;
   }
+}
+
+select {
+  background-color: $primary;
+  border: none;
+  padding: 0.8em;
 }

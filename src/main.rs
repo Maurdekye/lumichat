@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::default::Default;
 use std::env;
-use std::error::Error;
 use std::sync::{Arc, RwLock};
 
 use actix::{Actor, Addr, StreamHandler};
@@ -10,24 +9,16 @@ use actix_identity::{Identity, IdentityMiddleware};
 use actix_session::{storage::RedisSessionStore, SessionMiddleware};
 use actix_web::body::BoxBody;
 use actix_web::cookie::Key;
-use actix_web::web::{self, Data, Json};
-use actix_web::{get, post, App, HttpMessage, HttpRequest, HttpResponse, HttpServer, Responder};
-use actix_web_actors::ws::{self, WsResponseBuilder};
-use bcrypt::{hash, verify, DEFAULT_COST};
-use chrono::{NaiveDateTime, Utc};
+use actix_web::web::Data;
+use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Responder};
+use actix_web_actors::ws::{self};
 use diesel::prelude::*;
 use diesel::r2d2::{self, ConnectionManager};
-use diesel::Insertable;
-use diesel::{insert_into, update};
-use futures::stream::StreamExt;
-use reqwest::Client;
 
 use serde::Serialize;
 use shared::{api::*, model::*, websocket};
 
-use shared::schema::{
-    chats::dsl as chats_dsl, messages::dsl as messages_dsl, users::dsl as users_dsl,
-};
+use shared::schema::users::dsl as users_dsl;
 
 mod ollama {
     use std::error::Error;
@@ -83,6 +74,8 @@ mod ollama {
 
         #[derive(Serialize, Deserialize)]
         pub enum Role {
+            #[serde(rename = "system")]
+            System,
             #[serde(rename = "user")]
             User,
             #[serde(rename = "assistant")]
@@ -113,10 +106,39 @@ mod ollama {
             }
         }
 
+        pub enum NumPredict {
+            Tokens(u32),
+            #[allow(unused)]
+            Infinite,
+            #[allow(unused)]
+            FillContext,
+        }
+
+        impl Serialize for NumPredict {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                let int_val = match &self {
+                    NumPredict::Tokens(n) => *n as i32,
+                    NumPredict::Infinite => -1,
+                    NumPredict::FillContext => -2,
+                };
+                serializer.serialize_i32(int_val)
+            }
+        }
+
+        #[derive(Serialize)]
+        pub struct Options {
+            pub temperature: f64,
+            pub num_predict: NumPredict,
+        }
+
         #[derive(Serialize)]
         pub struct Request {
             pub model: String,
             pub messages: Vec<Message>,
+            pub options: Options,
         }
 
         pub enum Response {
@@ -133,7 +155,7 @@ mod ollama {
                 created_at: NaiveDateTime,
                 total_duration: u64,
                 load_duration: u64,
-                prompt_eval_count: u64,
+                // prompt_eval_count: u64,
                 prompt_eval_duration: u64,
                 eval_count: u64,
                 eval_duration: u64,
@@ -164,8 +186,8 @@ mod ollama {
                         u64_from_number(from_map!(map, "total_duration", Value::Number)?)?;
                     let load_duration =
                         u64_from_number(from_map!(map, "load_duration", Value::Number)?)?;
-                    let prompt_eval_count =
-                        u64_from_number(from_map!(map, "prompt_eval_count", Value::Number)?)?;
+                    // let prompt_eval_count =
+                    //     u64_from_number(from_map!(map, "prompt_eval_count", Value::Number)?)?;
                     let prompt_eval_duration =
                         u64_from_number(from_map!(map, "prompt_eval_duration", Value::Number)?)?;
                     let eval_count = u64_from_number(from_map!(map, "eval_count", Value::Number)?)?;
@@ -176,7 +198,7 @@ mod ollama {
                         created_at,
                         total_duration,
                         load_duration,
-                        prompt_eval_count,
+                        // prompt_eval_count,
                         prompt_eval_duration,
                         eval_count,
                         eval_duration,
@@ -327,31 +349,33 @@ mod ollama {
 }
 
 mod settings {
-    use std::{error::Error, str::FromStr};
-
-    use diesel::insert_into;
     use diesel::prelude::*;
-    use shared::{model::UserId, schema::settings};
+    use diesel::{delete, insert_into};
+    use shared::model::ModelSettings;
+    use shared::model::UserId;
+    use shared::schema::modelsettings;
 
-    use crate::Database;
+    use crate::DatabaseConnection;
 
-    #[derive(Clone, PartialEq, Eq)]
+    #[derive(Clone, Debug, PartialEq, Eq)]
     pub enum Scope {
         Default,
         Global,
         Model(String),
         User(UserId),
+        UserDefaultWithModel(UserId, String),
         UserModel(UserId, String),
     }
 
     impl Scope {
         fn up(self) -> Self {
             match self {
-                Scope::Default => Scope::Default,
+                Scope::Default => unimplemented!("Nothing above default scope"),
                 Scope::Global => Scope::Default,
                 Scope::Model(_) => Scope::Global,
                 Scope::User(_) => Scope::Global,
-                Scope::UserModel(_, model) => Scope::Model(model),
+                Scope::UserDefaultWithModel(_, model) => Scope::Model(model),
+                Scope::UserModel(user_id, model) => Scope::UserDefaultWithModel(user_id, model),
             }
         }
 
@@ -360,115 +384,73 @@ mod settings {
                 Scope::Default => unimplemented!("Default scope is never stored"),
                 Scope::Global => format!("GLOBAL"),
                 Scope::Model(model) => format!("MODEL#{model}"),
-                Scope::User(user_id) => format!("USER#{user_id}"),
+                Scope::User(user_id) | Scope::UserDefaultWithModel(user_id, _) => {
+                    format!("USER#{user_id}")
+                }
                 Scope::UserModel(user_id, model) => format!("USER#{user_id}#MODEL#{model}"),
             }
         }
     }
 
-    #[derive(Insertable, AsChangeset)]
-    #[diesel(table_name = shared::schema::settings)]
-    pub struct NewSetting<'a> {
-        pub scope: &'a str,
-        pub key: &'a str,
-        pub value: &'a str,
-    }
-
-    #[derive(Clone)]
-    struct Setting<T: Clone> {
-        key: String,
-        default: T,
-        db: Database,
-    }
-
-    impl<T: Clone> Setting<T> {
-        fn get(&self, mut scope: Scope) -> T
-        where
-            T: Clone + FromStr,
-            T::Err: Error,
-        {
-            let mut db = self.db.get().expect("Error connecting to database");
-            while scope != Scope::Default {
-                let value: Option<String> = settings::dsl::settings
-                    .select(settings::dsl::value)
-                    .filter(settings::dsl::scope.eq(scope.key()))
-                    .filter(settings::dsl::key.eq(&self.key))
-                    .first(&mut db)
-                    .optional()
-                    .expect("Unable to query database");
-                if let Some(value) = value {
-                    let value: T = value.parse().unwrap_or_else(|e| {
-                        panic!(
-                            "Unable to parse setting value {} '{}': {}",
-                            scope.key(),
-                            &self.key,
-                            e
-                        )
-                    });
-                    return value;
-                }
-                scope = scope.up();
+    pub fn get(db: &mut DatabaseConnection, mut scope: Scope) -> ModelSettings {
+        while scope != Scope::Default {
+            let value: Option<ModelSettings> = modelsettings::dsl::modelsettings
+                .select(ModelSettings::as_select())
+                .filter(modelsettings::dsl::scope.eq(scope.key()))
+                .first(db)
+                .optional()
+                .expect("Unable to query database");
+            if let Some(value) = value {
+                return value;
             }
-            self.default.clone()
+            scope = scope.up();
         }
+        ModelSettings::default()
+    }
 
-        fn set(&self, scope: Scope, value: T)
-        where
-            T: ToString,
-        {
-            let mut db = self.db.get().expect("Error connecting to database");
-            let new_setting = NewSetting {
-                scope: &scope.key(),
-                key: &self.key,
-                value: &value.to_string(),
-            };
-            insert_into(settings::dsl::settings)
-                .values(&new_setting)
-                .on_conflict((settings::dsl::scope, settings::dsl::key))
-                .do_update()
-                .set(&new_setting)
-                .execute(&mut db)
-                .expect("Error updating database");
+    #[derive(Identifiable, Insertable, AsChangeset)]
+    #[diesel(table_name = shared::schema::modelsettings)]
+    #[diesel(primary_key(scope))]
+    struct NewModelSettings {
+        scope: String,
+        temperature: f64,
+        context_length: i32,
+        system_prompt: Option<String>,
+    }
+
+    impl NewModelSettings {
+        fn from(
+            scope: Scope,
+            ModelSettings {
+                temperature,
+                context_length,
+                system_prompt,
+            }: ModelSettings,
+        ) -> Self {
+            Self {
+                scope: scope.key(),
+                temperature,
+                context_length,
+                system_prompt,
+            }
         }
     }
 
-    macro_rules! settings {
-        (
-            type Database = $database:ty;
-            struct $settings_struct:ident ($(
-                $name:ident: $typ:ty = $default:expr,
-            )*)
-        ) => {
-            #[derive(Clone)]
-            pub struct $settings_struct {
-                $(
-                    $name: $crate::settings::Setting<$typ>,
-                )*
-            }
-
-            impl $settings_struct {
-                pub fn new(db: $database) -> Self {
-                    Self {
-                        $(
-                            $name: $crate::settings::Setting {
-                                key: stringify!($name).into(),
-                                default: $default.into(),
-                                db: db.clone(),
-                            },
-                        )*
-                    }
-                }
-            }
-        };
+    pub fn set(db: &mut DatabaseConnection, scope: Scope, settings: ModelSettings) {
+        let new_settings = NewModelSettings::from(scope, settings);
+        insert_into(modelsettings::dsl::modelsettings)
+            .values(&new_settings)
+            .on_conflict(modelsettings::dsl::scope)
+            .do_update()
+            .set(&new_settings)
+            .execute(db)
+            .expect("Error updating database");
     }
 
-    settings! {
-        type Database = Database;
-        struct Settings (
-            temperature: f64 = 1.0,
-            context_length: u64 = 4096u64,
-            system_message: String = "",
-        )
+    pub fn clear(db: &mut DatabaseConnection, scope: Scope) {
+        delete(modelsettings::dsl::modelsettings.filter(modelsettings::dsl::scope.eq(scope.key())))
+            .execute(db)
+            .expect("Error updating database");
     }
 }
 
@@ -484,8 +466,6 @@ enum Response<T> {
     BadRequest(T),
     Unauthorized,
 }
-
-use crate::settings::Settings;
 
 use self::Response::*;
 
@@ -623,649 +603,771 @@ impl FullUserFromIdentity for Option<Identity> {
     }
 }
 
-// Websocket management
+mod api {
+    use std::error::Error;
+    use std::iter::once;
 
-// TODO: accept periodic pings & close dead connections that dont send them
+    use actix_identity::Identity;
+    use actix_web::web::{self, Data, Json};
+    use actix_web::{get, post, HttpMessage, HttpRequest, HttpResponse, Responder};
+    use actix_web_actors::ws::WsResponseBuilder;
+    use bcrypt::{hash, verify, DEFAULT_COST};
+    use chrono::{NaiveDateTime, Utc};
+    use diesel::prelude::*;
+    use diesel::Insertable;
+    use diesel::{insert_into, update};
+    use futures::stream::StreamExt;
+    use reqwest::Client;
 
-#[get("/ws")]
-async fn ws_handler(
-    request: HttpRequest,
-    stream: web::Payload,
-    identity: Identity,
-    state: Data<State>,
-) -> impl Responder {
-    println!("/ws");
-    let user_id = identity.user_id().expect("Failed to get user id");
-    let mut state = state.write().unwrap();
-    let (websocket_address, response) = WsResponseBuilder::new(Websocket, &request, stream)
-        .start_with_addr()
-        .expect("Unable to create websocket connection");
-    state
-        .websock_connections
-        .entry(user_id)
-        .or_insert_with(Vec::new)
-        .push(websocket_address);
-    response
-}
+    use shared::{api::*, model::*, websocket};
 
-// User Authentication
-
-#[derive(Insertable)]
-#[diesel(table_name = shared::schema::users)]
-pub struct NewFullUser<'a> {
-    username: &'a str,
-    email: &'a str,
-    password_hash: &'a str,
-    admin: bool,
-}
-
-#[post("/admin-signup")]
-async fn admin_signup_handler(
-    body: Json<create_user::Request>,
-    db: Data<Database>,
-    config: Data<Config>,
-) -> Response<create_user::Response> {
-    // check if admin signup is enabled
-    if !config.admin_signup {
-        return Unauthorized;
-    }
-
-    // proceed to user creation
-    let mut db = db.get().expect("Database not available");
-    create_user_inner(body, &mut db, true).await
-}
-
-#[post("/create-user")]
-async fn create_user_handler(
-    identity: Identity,
-    body: Json<create_user::Request>,
-    db: Data<Database>,
-) -> Response<create_user::Response> {
-    // check if operating user is an admin
-    let mut db = db.get().expect("Database not available");
-    let user = identity.user(&mut db).expect("Unable to load user profile");
-    if !user.admin {
-        return Unauthorized;
-    }
-
-    // proceed to user creation
-    create_user_inner(body, &mut db, false).await
-}
-
-async fn create_user_inner(
-    body: Json<create_user::Request>,
-    db: &mut DatabaseConnection,
-    make_admin: bool,
-) -> Response<create_user::Response> {
-    // decode request
-    let body = body.into_inner();
-    println!("/create-user: {body:#?}");
-
-    // validate password
-    response_try!(validate_password(&body.password)
-        .map_err(create_user::FailureReason::InvalidPassword)
-        .map_err(create_user::Response::Failure));
-
-    // check for existing users
-    let user_query = users_dsl::users
-        .filter(users_dsl::username.eq(&body.username))
-        .or_filter(users_dsl::email.eq(&body.email))
-        .first::<FullUser>(db)
-        .optional()
-        .expect("Error querying database");
-
-    if let Some(_) = user_query {
-        return BadRequest(create_user::Response::Failure(
-            create_user::FailureReason::UserExists,
-        ));
-    }
-
-    // Prepare the new user data
-    let new_user = NewFullUser {
-        username: &body.username,
-        email: &body.email,
-        password_hash: &hash(&body.password, DEFAULT_COST).expect("Error hashing password"),
-        admin: make_admin,
+    use shared::schema::{
+        chats::dsl as chats_dsl, messages::dsl as messages_dsl, users::dsl as users_dsl,
     };
 
-    // Insert new user into the database
-    let new_user: FullUser = insert_into(users_dsl::users)
-        .values(&new_user)
-        .get_result(db)
-        .expect("Error inserting new user");
+    use crate::{
+        ollama, settings, validate_password, Config, Database, DatabaseConnection,
+        FullUserFromIdentity,
+        Response::{self, *},
+        State, UserIdFromIdentity, Websocket,
+    };
 
-    // Respond successfully
-    Okay(create_user::Response::Success(new_user.into()))
-}
+    // Websocket management
 
-#[post("/login")]
-async fn login_handler(
-    user: Option<Identity>,
-    request: HttpRequest,
-    body: Json<login::Request>,
-    db: Data<Database>,
-) -> Response<login::Response> {
-    // check if already logged in
-    if user.is_some() {
-        return BadRequest(login::Response::Failure(
-            login::FailureReason::AlreadyLoggedIn,
-        ));
+    // TODO: accept periodic pings & close dead connections that dont send them
+
+    #[get("/ws")]
+    pub async fn ws_handler(
+        request: HttpRequest,
+        stream: web::Payload,
+        identity: Identity,
+        state: Data<State>,
+    ) -> impl Responder {
+        println!("/ws");
+        let user_id = identity.user_id().expect("Failed to get user id");
+        let mut state = state.write().unwrap();
+        let (websocket_address, response) = WsResponseBuilder::new(Websocket, &request, stream)
+            .start_with_addr()
+            .expect("Unable to create websocket connection");
+        state
+            .websock_connections
+            .entry(user_id)
+            .or_insert_with(Vec::new)
+            .push(websocket_address);
+        response
     }
 
-    // decode request
-    let body = body.into_inner();
-    println!("/login: {body:#?}");
+    // User Authentication
 
-    // check database for user
-    let mut db = db.get().expect("Database not available");
-    let user_query = users_dsl::users
-        .filter(
-            users_dsl::username
-                .eq(&body.identifier)
-                .or(users_dsl::email.eq(&body.identifier)),
-        )
-        .first::<FullUser>(&mut db)
-        .optional()
-        .expect("Error querying database");
-
-    let Some(user) = user_query else {
-        return BadRequest(login::Response::Failure(
-            login::FailureReason::UserDoesNotExist,
-        ));
-    };
-
-    // check password
-    if !verify(&body.password, &user.password_hash).expect("Error decrypting password") {
-        return BadRequest(login::Response::Failure(
-            login::FailureReason::InvalidPassword,
-        ));
+    #[derive(Insertable)]
+    #[diesel(table_name = shared::schema::users)]
+    pub struct NewFullUser<'a> {
+        username: &'a str,
+        email: &'a str,
+        password_hash: &'a str,
+        admin: bool,
     }
 
-    // log user in
-    Identity::login(&request.extensions(), user.id.to_string()).unwrap();
-    Okay(login::Response::Success(user.into()))
-}
+    #[post("/admin-signup")]
+    async fn admin_signup_handler(
+        body: Json<create_user::Request>,
+        db: Data<Database>,
+        config: Data<Config>,
+    ) -> Response<create_user::Response> {
+        // check if admin signup is enabled
+        if !config.admin_signup {
+            return Unauthorized;
+        }
 
-#[get("/me")]
-async fn me_handler(identity: Option<Identity>, db: Data<Database>) -> Response<me::Response> {
-    println!("/me");
-    let mut db = db.get().expect("Database not available");
-    let response = match identity.user(&mut db) {
-        None => me::Response::Anonymous,
-        Some(user) => me::Response::User(user.into()),
-    };
-    Okay(response)
-}
+        // proceed to user creation
+        let mut db = db.get().expect("Database not available");
+        create_user_inner(body, &mut db, true).await
+    }
 
-#[post("/logout")]
-async fn logout_handler(user: Identity) -> impl Responder {
-    println!("/logout");
-    user.logout();
-    HttpResponse::Ok().finish()
-}
+    #[post("/create-user")]
+    async fn create_user_handler(
+        identity: Identity,
+        body: Json<create_user::Request>,
+        db: Data<Database>,
+    ) -> Response<create_user::Response> {
+        // check if operating user is an admin
+        let mut db = db.get().expect("Database not available");
+        let user = identity.user(&mut db).expect("Unable to load user profile");
+        if !user.admin {
+            return Unauthorized;
+        }
 
-// Chatting
+        // proceed to user creation
+        create_user_inner(body, &mut db, false).await
+    }
 
-#[derive(Insertable)]
-#[diesel(table_name = shared::schema::messages)]
-struct NewMessage<'a> {
-    chat: ChatId,
-    author: AuthorType,
-    content: &'a str,
-    created: NaiveDateTime,
-}
+    async fn create_user_inner(
+        body: Json<create_user::Request>,
+        db: &mut DatabaseConnection,
+        make_admin: bool,
+    ) -> Response<create_user::Response> {
+        // decode request
+        let body = body.into_inner();
+        println!("/create-user: {body:#?}");
 
-async fn submit_chat_message(
-    mut db: DatabaseConnection,
-    user: UserId,
-    chat: Chat,
-    content: &str,
-    state: Data<State>,
-    config: Data<Config>,
-) -> (Message, Message) {
-    // put new message into database
-    let now = Utc::now().naive_utc();
-    let new_message = NewMessage {
-        chat: chat.id,
-        author: AuthorType::User,
-        content,
-        created: now,
-    };
-    let user_message: Message = insert_into(messages_dsl::messages)
-        .values(&new_message)
-        .get_result(&mut db)
-        .expect("Error inserting message into new chat");
+        // validate password
+        response_try!(validate_password(&body.password)
+            .map_err(create_user::FailureReason::InvalidPassword)
+            .map_err(create_user::Response::Failure));
 
-    // get prior message context for llm query
-    let messages: Vec<Message> = messages_dsl::messages
-        .filter(messages_dsl::chat.eq(chat.id))
-        .order(messages_dsl::created.asc())
-        .load(&mut db)
-        .expect("Error querying database");
+        // check for existing users
+        let user_query = users_dsl::users
+            .filter(users_dsl::username.eq(&body.username))
+            .or_filter(users_dsl::email.eq(&body.email))
+            .first::<FullUser>(db)
+            .optional()
+            .expect("Error querying database");
 
-    // put empty assistant response into database
-    let assistant_message = NewMessage {
-        chat: chat.id,
-        author: AuthorType::AssistantResponding,
-        content: "",
-        created: now,
-    };
-    let assistant_message: Message = insert_into(messages_dsl::messages)
-        .values(&assistant_message)
-        .get_result(&mut db)
-        .expect("Error inserting assistant message into new chat");
+        if let Some(_) = user_query {
+            return BadRequest(create_user::Response::Failure(
+                create_user::FailureReason::UserExists,
+            ));
+        }
 
-    // query llm
-    {
-        let assistant_message = assistant_message.clone();
-        actix::spawn(async move {
-            if let Err(error) = async {
-                let message = assistant_message.id;
+        // Prepare the new user data
+        let new_user = NewFullUser {
+            username: &body.username,
+            email: &body.email,
+            password_hash: &hash(&body.password, DEFAULT_COST).expect("Error hashing password"),
+            admin: make_admin,
+        };
 
-                let client = Client::new();
-                let mut response = client
-                    .post(format!("{}/api/chat", config.llm_api_url))
-                    .json(&ollama::chat::Request {
-                        model: chat.model.clone(),
-                        messages: messages
-                            .into_iter()
-                            .map(ollama::chat::Message::from)
-                            .collect(),
-                    })
-                    .send()
-                    .await?
-                    .bytes_stream();
+        // Insert new user into the database
+        let new_user: FullUser = insert_into(users_dsl::users)
+            .values(&new_user)
+            .get_result(db)
+            .expect("Error inserting new user");
 
-                let mut response_message = String::new();
+        // Respond successfully
+        Okay(create_user::Response::Success(new_user.into()))
+    }
 
-                let created_at = 'message_loop: {
-                    let message_id = message;
-                    let mut is_first_token = true;
-                    while let Some(bytes) = response.next().await {
-                        let response: ollama::chat::Response = serde_json::from_slice(&bytes?)?;
-                        // println!("message: {response:?}");
-                        match response {
-                            ollama::chat::Response::Error { error } => Err(error)?,
-                            ollama::chat::Response::Progress { message, .. } => {
-                                let mut content = message.content;
+    #[post("/login")]
+    async fn login_handler(
+        user: Option<Identity>,
+        request: HttpRequest,
+        body: Json<login::Request>,
+        db: Data<Database>,
+    ) -> Response<login::Response> {
+        // check if already logged in
+        if user.is_some() {
+            return BadRequest(login::Response::Failure(
+                login::FailureReason::AlreadyLoggedIn,
+            ));
+        }
 
-                                // remove prefixed space character if it appears
-                                if is_first_token && content.chars().next() == Some(' ') {
-                                    content = content.split_off(1);
-                                    is_first_token = false;
+        // decode request
+        let body = body.into_inner();
+        println!("/login: {body:#?}");
+
+        // check database for user
+        let mut db = db.get().expect("Database not available");
+        let user_query = users_dsl::users
+            .filter(
+                users_dsl::username
+                    .eq(&body.identifier)
+                    .or(users_dsl::email.eq(&body.identifier)),
+            )
+            .first::<FullUser>(&mut db)
+            .optional()
+            .expect("Error querying database");
+
+        let Some(user) = user_query else {
+            return BadRequest(login::Response::Failure(
+                login::FailureReason::UserDoesNotExist,
+            ));
+        };
+
+        // check password
+        if !verify(&body.password, &user.password_hash).expect("Error decrypting password") {
+            return BadRequest(login::Response::Failure(
+                login::FailureReason::InvalidPassword,
+            ));
+        }
+
+        // log user in
+        Identity::login(&request.extensions(), user.id.to_string()).unwrap();
+        Okay(login::Response::Success(user.into()))
+    }
+
+    #[get("/me")]
+    async fn me_handler(identity: Option<Identity>, db: Data<Database>) -> Response<me::Response> {
+        println!("/me");
+        let mut db = db.get().expect("Database not available");
+        let response = match identity.user(&mut db) {
+            None => me::Response::Anonymous,
+            Some(user) => me::Response::User(user.into()),
+        };
+        Okay(response)
+    }
+
+    #[post("/logout")]
+    async fn logout_handler(user: Identity) -> impl Responder {
+        println!("/logout");
+        user.logout();
+        HttpResponse::Ok().finish()
+    }
+
+    // Chatting
+
+    #[derive(Insertable)]
+    #[diesel(table_name = shared::schema::messages)]
+    struct NewMessage<'a> {
+        chat: ChatId,
+        author: AuthorType,
+        content: &'a str,
+        created: NaiveDateTime,
+    }
+
+    async fn submit_chat_message(
+        mut db: DatabaseConnection,
+        user: UserId,
+        chat: Chat,
+        content: &str,
+        state: Data<State>,
+        config: Data<Config>,
+    ) -> (Message, Message) {
+        // put new message into database
+        let now = Utc::now().naive_utc();
+        let new_message = NewMessage {
+            chat: chat.id,
+            author: AuthorType::User,
+            content,
+            created: now,
+        };
+        let user_message: Message = insert_into(messages_dsl::messages)
+            .values(&new_message)
+            .get_result(&mut db)
+            .expect("Error inserting message into new chat");
+
+        // get prior message context for llm query
+        let messages: Vec<Message> = messages_dsl::messages
+            .filter(messages_dsl::chat.eq(chat.id))
+            .order(messages_dsl::created.asc())
+            .load(&mut db)
+            .expect("Error querying database");
+
+        // put empty assistant response into database
+        let assistant_message = NewMessage {
+            chat: chat.id,
+            author: AuthorType::AssistantResponding,
+            content: "",
+            created: now,
+        };
+        let assistant_message: Message = insert_into(messages_dsl::messages)
+            .values(&assistant_message)
+            .get_result(&mut db)
+            .expect("Error inserting assistant message into new chat");
+
+        // query llm
+        {
+            let assistant_message = assistant_message.clone();
+
+            // fetch settings
+            let model = chat.model.clone();
+            let model_settings =
+                settings::get(&mut db, settings::Scope::UserModel(user, model.clone()));
+            let options = ollama::chat::Options {
+                temperature: model_settings.temperature,
+                num_predict: ollama::chat::NumPredict::Tokens(model_settings.context_length as u32),
+            };
+
+            // prepend system prompt if present
+            let messages = messages.into_iter().map(ollama::chat::Message::from);
+            let messages = if let Some(system_prompt) = model_settings.system_prompt {
+                once(ollama::chat::Message {
+                    role: ollama::chat::Role::System,
+                    content: system_prompt,
+                })
+                .chain(messages)
+                .collect()
+            } else {
+                messages.collect()
+            };
+            actix::spawn(async move {
+                if let Err(error) = async {
+                    let message = assistant_message.id;
+
+                    let client = Client::new();
+                    let mut response = client
+                        .post(format!("{}/api/chat", config.llm_api_url))
+                        .json(&ollama::chat::Request {
+                            model,
+                            messages,
+                            options,
+                        })
+                        .send()
+                        .await?
+                        .bytes_stream();
+
+                    let mut response_message = String::new();
+
+                    let created_at = 'message_loop: {
+                        let message_id = message;
+                        let mut is_first_token = true;
+                        while let Some(bytes) = response.next().await {
+                            let response: ollama::chat::Response = serde_json::from_slice(&bytes?)?;
+                            // println!("message: {response:?}");
+                            match response {
+                                ollama::chat::Response::Error { error } => Err(error)?,
+                                ollama::chat::Response::Progress { message, .. } => {
+                                    let mut content = message.content;
+
+                                    // remove prefixed space character if it appears
+                                    if is_first_token && content.chars().next() == Some(' ') {
+                                        content = content.split_off(1);
+                                        is_first_token = false;
+                                    }
+
+                                    // append new tokens to response
+                                    response_message.push_str(&content);
+
+                                    state.write().unwrap().send_message(
+                                        user,
+                                        websocket::Message::Message {
+                                            chat: chat.id,
+                                            message: message_id,
+                                            content: websocket::chat::Message::Token(content),
+                                        },
+                                    );
                                 }
-
-                                // append new tokens to response
-                                response_message.push_str(&content);
-
-                                state.write().unwrap().send_message(
-                                    user,
-                                    websocket::Message::Message {
-                                        chat: chat.id,
-                                        message: message_id,
-                                        content: websocket::chat::Message::Token(content),
-                                    },
-                                );
-                            }
-                            ollama::chat::Response::Finish { created_at, .. } => {
-                                break 'message_loop created_at;
+                                ollama::chat::Response::Finish { created_at, .. } => {
+                                    break 'message_loop created_at;
+                                }
                             }
                         }
-                    }
-                    return Err("Unexpected end of message stream".into());
-                };
+                        return Err("Unexpected end of message stream".into());
+                    };
 
-                // send completion message
-                state.write().unwrap().send_message(
-                    user,
-                    websocket::Message::Message {
-                        chat: chat.id,
-                        message,
-                        content: websocket::chat::Message::Finish,
-                    },
-                );
+                    // send completion message
+                    state.write().unwrap().send_message(
+                        user,
+                        websocket::Message::Message {
+                            chat: chat.id,
+                            message,
+                            content: websocket::chat::Message::Finish,
+                        },
+                    );
 
-                // push completed message to database
-                update(&assistant_message)
-                    .set((
-                        messages_dsl::created.eq(created_at),
-                        messages_dsl::content.eq(response_message),
-                        messages_dsl::author.eq(AuthorType::AssistantFinished),
-                    ))
-                    .execute(&mut db)
-                    .expect("Error updating database");
+                    // push completed message to database
+                    update(&assistant_message)
+                        .set((
+                            messages_dsl::created.eq(created_at),
+                            messages_dsl::content.eq(response_message),
+                            messages_dsl::author.eq(AuthorType::AssistantFinished),
+                        ))
+                        .execute(&mut db)
+                        .expect("Error updating database");
 
-                Ok::<_, Box<dyn Error>>(())
-            }
-            .await
-            {
-                eprintln!("Error requesting completion from llm api: {:#?}", error);
+                    Ok::<_, Box<dyn Error>>(())
+                }
+                .await
+                {
+                    eprintln!("Error requesting completion from llm api: {:#?}", error);
 
-                let error_text = format!("{error}");
+                    let error_text = format!("{error}");
 
-                // send error message
-                state.write().unwrap().send_message(
-                    user,
-                    websocket::Message::Message {
-                        chat: chat.id,
-                        message: assistant_message.id,
-                        content: websocket::chat::Message::Error(error_text.clone()),
-                    },
-                );
+                    // send error message
+                    state.write().unwrap().send_message(
+                        user,
+                        websocket::Message::Message {
+                            chat: chat.id,
+                            message: assistant_message.id,
+                            content: websocket::chat::Message::Error(error_text.clone()),
+                        },
+                    );
 
-                // push error message to database
-                update(&assistant_message)
-                    .set((
-                        messages_dsl::error.eq(error_text),
-                        messages_dsl::author.eq(AuthorType::AssistantError),
-                    ))
-                    .execute(&mut db)
-                    .expect("Error updating database");
-            }
-        });
+                    // push error message to database
+                    update(&assistant_message)
+                        .set((
+                            messages_dsl::error.eq(error_text),
+                            messages_dsl::author.eq(AuthorType::AssistantError),
+                        ))
+                        .execute(&mut db)
+                        .expect("Error updating database");
+                }
+            });
+        }
+
+        (user_message, assistant_message)
     }
 
-    (user_message, assistant_message)
-}
+    #[derive(Insertable)]
+    #[diesel(table_name = shared::schema::chats)]
+    struct NewChat<'a> {
+        name: &'a str,
+        owner: UserId,
+        created: NaiveDateTime,
+        model: &'a str,
+    }
 
-#[derive(Insertable)]
-#[diesel(table_name = shared::schema::chats)]
-struct NewChat<'a> {
-    name: &'a str,
-    owner: UserId,
-    created: NaiveDateTime,
-    model: &'a str,
-}
+    #[post("/new-chat")]
+    async fn new_chat_handler(
+        identity: Identity,
+        db: Data<Database>,
+        state: Data<State>,
+        config: Data<Config>,
+        body: Json<new_chat::Request>,
+    ) -> Response<new_chat::Response> {
+        // decode request
+        let body = body.into_inner();
+        println!("/new-chat: {body:#?}");
 
-#[post("/new-chat")]
-async fn new_chat_handler(
-    identity: Identity,
-    db: Data<Database>,
-    state: Data<State>,
-    config: Data<Config>,
-    body: Json<new_chat::Request>,
-) -> Response<new_chat::Response> {
-    // decode request
-    let body = body.into_inner();
-    println!("/new-chat: {body:#?}");
+        // put new chat into database
+        let user_id = identity.user_id().expect("Failed to get user id");
+        let mut db = db.get().expect("Database not available");
+        let now = Utc::now().naive_utc();
+        let chat = NewChat {
+            name: "New Chat",
+            owner: user_id,
+            created: now.clone(),
+            model: &body.model,
+        };
+        let chat: Chat = insert_into(chats_dsl::chats)
+            .values(&chat)
+            .get_result(&mut db)
+            .expect("Error insterting new chat");
 
-    // put new chat into database
-    let user_id = identity.user_id().expect("Failed to get user id");
-    let mut db = db.get().expect("Database not available");
-    let now = Utc::now().naive_utc();
-    let chat = NewChat {
-        name: "New Chat",
-        owner: user_id,
-        created: now.clone(),
-        model: &body.model,
-    };
-    let chat: Chat = insert_into(chats_dsl::chats)
-        .values(&chat)
-        .get_result(&mut db)
-        .expect("Error insterting new chat");
+        // place new chat message in database
+        let (user_message, assistant_response) = submit_chat_message(
+            db,
+            user_id,
+            chat.clone(),
+            &body.initial_message,
+            state,
+            config,
+        )
+        .await;
 
-    // place new chat message in database
-    let (user_message, assistant_response) = submit_chat_message(
-        db,
-        user_id,
-        chat.clone(),
-        &body.initial_message,
-        state,
-        config,
-    )
-    .await;
+        // send chat id and assistant message id back
+        let chat = chat.into();
+        Okay(new_chat::Response {
+            chat,
+            user_message,
+            assistant_response,
+        })
+    }
 
-    // send chat id and assistant message id back
-    let chat = chat.into();
-    Okay(new_chat::Response {
-        chat,
-        user_message,
-        assistant_response,
-    })
-}
+    enum GetChatError {
+        ChatDoesNotExist,
+        ChatNotOwnedByUser,
+    }
 
-enum GetChatError {
-    ChatDoesNotExist,
-    ChatNotOwnedByUser,
-}
-
-macro_rules! get_chat_error_into {
-    ($typ:ty) => {
-        impl Into<$typ> for GetChatError {
-            fn into(self) -> $typ {
-                match self {
-                    Self::ChatDoesNotExist => <$typ>::ChatDoesNotExist,
-                    Self::ChatNotOwnedByUser => <$typ>::ChatNotOwnedByUser,
+    macro_rules! get_chat_error_into {
+        ($typ:ty) => {
+            impl Into<$typ> for GetChatError {
+                fn into(self) -> $typ {
+                    match self {
+                        Self::ChatDoesNotExist => <$typ>::ChatDoesNotExist,
+                        Self::ChatNotOwnedByUser => <$typ>::ChatNotOwnedByUser,
+                    }
                 }
             }
-        }
-    };
-}
-
-fn get_chat_by_user(
-    identity: Identity,
-    chat: ChatId,
-    db: &mut DatabaseConnection,
-) -> Result<Chat, GetChatError> {
-    // get associated chat
-    let Some(chat): Option<Chat> = chats_dsl::chats
-        .find(chat)
-        .first(db)
-        .optional()
-        .expect("Error querying database")
-    else {
-        return Err(GetChatError::ChatDoesNotExist);
-    };
-
-    // confirm that user owns the given chat
-    let user_id = identity.user_id().expect("Failed to get user id");
-    if chat.owner != user_id {
-        return Err(GetChatError::ChatNotOwnedByUser);
+        };
     }
 
-    Ok(chat)
-}
+    fn get_chat_by_user(
+        identity: Identity,
+        chat: ChatId,
+        db: &mut DatabaseConnection,
+    ) -> Result<Chat, GetChatError> {
+        // get associated chat
+        let Some(chat): Option<Chat> = chats_dsl::chats
+            .find(chat)
+            .first(db)
+            .optional()
+            .expect("Error querying database")
+        else {
+            return Err(GetChatError::ChatDoesNotExist);
+        };
 
-get_chat_error_into!(chat_message::FailureReason);
-
-#[post("/chat-message")]
-async fn chat_message_handler(
-    identity: Identity,
-    db: Data<Database>,
-    state: Data<State>,
-    config: Data<Config>,
-    body: Json<chat_message::Request>,
-) -> Response<chat_message::Response> {
-    // decode request
-    let body = body.into_inner();
-    println!("/chat-message: {body:#?}");
-
-    // check database that chat exists
-    let mut db = db.get().expect("Database not available");
-    let chat = response_try!(get_chat_by_user(identity, body.chat, &mut db)
-        .map_err(Into::into)
-        .map_err(chat_message::Response::Failure));
-
-    // place new chat message in database
-    let (user_message, assistant_response) =
-        submit_chat_message(db, chat.owner, chat, &body.message, state, config).await;
-
-    // send newly created messages back
-    Okay(chat_message::Response::Success {
-        user_message,
-        assistant_response,
-    })
-}
-
-// can't derive AsChangeset on the shared Chat struct; causes trunk build to fail:
-//
-// error[E0277]: the trait bound `NaiveDateTime: AppearsOnTable<chats::table>` is not satisfied
-//   --> shared/src/lib.rs:50:39
-//    |
-// 50 |     #[derive(Queryable, Identifiable, AsChangeset, Serialize, Deserialize, Clone, Debug, PartialEq)]
-//    |                                       ^^^^^^^^^^^ the trait `AppearsOnTable<chats::table>` is not implemented for `NaiveDateTime`
-//    |
-//
-#[derive(AsChangeset)]
-#[diesel(table_name = shared::schema::chats)]
-pub struct ChatChangeset<'a> {
-    pub id: &'a ChatId,
-    pub name: &'a String,
-    pub owner: &'a UserId,
-    pub created: &'a NaiveDateTime,
-    pub model: &'a String,
-}
-
-impl<'a> From<&'a Chat> for ChatChangeset<'a> {
-    fn from(
-        Chat {
-            id,
-            name,
-            owner,
-            created,
-            model,
-        }: &'a Chat,
-    ) -> Self {
-        Self {
-            id,
-            name,
-            owner,
-            created,
-            model,
+        // confirm that user owns the given chat
+        let user_id = identity.user_id().expect("Failed to get user id");
+        if chat.owner != user_id {
+            return Err(GetChatError::ChatNotOwnedByUser);
         }
+
+        Ok(chat)
     }
-}
 
-get_chat_error_into!(update_chat::FailureReason);
+    get_chat_error_into!(chat_message::FailureReason);
 
-#[post("/update-chat")]
-async fn update_chat_handler(
-    identity: Identity,
-    body: Json<Chat>,
-    db: Data<Database>,
-) -> Response<update_chat::Response> {
-    // decode request
-    let chat = body.into_inner();
-    println!("/update-chat: {chat:#?}");
+    #[post("/chat-message")]
+    async fn chat_message_handler(
+        identity: Identity,
+        db: Data<Database>,
+        state: Data<State>,
+        config: Data<Config>,
+        body: Json<chat_message::Request>,
+    ) -> Response<chat_message::Response> {
+        // decode request
+        let body = body.into_inner();
+        println!("/chat-message: {body:#?}");
 
-    // check to make sure chat is valid
-    let mut db = db.get().expect("Database not available");
-    response_try!(get_chat_by_user(identity, chat.id, &mut db)
-        .map_err(Into::into)
-        .map_err(update_chat::Response::Failure));
+        // check database that chat exists
+        let mut db = db.get().expect("Database not available");
+        let chat = response_try!(get_chat_by_user(identity, body.chat, &mut db)
+            .map_err(Into::into)
+            .map_err(chat_message::Response::Failure));
 
-    // perform update
-    update(&chat)
-        .set(ChatChangeset::from(&chat))
-        .execute(&mut db)
-        .expect("Error updating database");
+        // place new chat message in database
+        let (user_message, assistant_response) =
+            submit_chat_message(db, chat.owner, chat, &body.message, state, config).await;
 
-    Okay(update_chat::Response::Success)
-}
+        // send newly created messages back
+        Okay(chat_message::Response::Success {
+            user_message,
+            assistant_response,
+        })
+    }
 
-#[get("/list-chats")]
-async fn list_chats_handler(identity: Identity, db: Data<Database>) -> impl Responder {
-    println!("/list-chats");
+    get_chat_error_into!(update_chat::FailureReason);
 
-    // get chats owned by user
-    let user_id = identity.user_id().expect("Failed to get user id");
-    let mut db = db.get().expect("Database not available");
-    let chats: Vec<Chat> = chats_dsl::chats
-        .filter(chats_dsl::owner.eq(user_id))
-        .load(&mut db)
-        .expect("Error querying database");
-    let chats = chats.into_iter().map(Chat::from).collect();
+    #[post("/update-chat")]
+    async fn update_chat_handler(
+        identity: Identity,
+        body: Json<Chat>,
+        db: Data<Database>,
+    ) -> Response<update_chat::Response> {
+        // decode request
+        let chat = body.into_inner();
+        println!("/update-chat: {chat:#?}");
 
-    HttpResponse::Ok().json(list_chats::Response { chats })
-}
+        // check to make sure chat is valid
+        let mut db = db.get().expect("Database not available");
+        response_try!(get_chat_by_user(identity, chat.id, &mut db)
+            .map_err(Into::into)
+            .map_err(update_chat::Response::Failure));
 
-get_chat_error_into!(check_chat::FailureReason);
+        // perform update
+        update(&chat)
+            .set(&chat)
+            .execute(&mut db)
+            .expect("Error updating database");
 
-#[post("/check-chat")]
-async fn check_chat_handler(
-    identity: Identity,
-    body: Json<check_chat::Request>,
-    db: Data<Database>,
-) -> Response<check_chat::Response> {
-    // decode response
-    let body = body.into_inner();
-    println!("/check-chat: {body:#?}");
+        Okay(update_chat::Response::Success)
+    }
 
-    // get associated chat
-    let mut db = db.get().expect("Database not available");
-    let chat = response_try!(get_chat_by_user(identity, body.chat, &mut db)
-        .map_err(Into::into)
-        .map_err(check_chat::Response::Failure));
+    #[get("/list-chats")]
+    async fn list_chats_handler(identity: Identity, db: Data<Database>) -> impl Responder {
+        println!("/list-chats");
 
-    // get most recent message timestamp
-    let Some(most_recent_message): Option<Message> = messages_dsl::messages
-        .filter(messages_dsl::chat.eq(chat.id))
-        .order(messages_dsl::created.desc())
-        .first(&mut db)
-        .optional()
-        .expect("Error querying database")
-    else {
-        return BadRequest(check_chat::Response::Failure(
-            check_chat::FailureReason::ChatHasNoMessages,
-        ));
-    };
+        // get chats owned by user
+        let user_id = identity.user_id().expect("Failed to get user id");
+        let mut db = db.get().expect("Database not available");
+        let chats: Vec<Chat> = chats_dsl::chats
+            .filter(chats_dsl::owner.eq(user_id))
+            .load(&mut db)
+            .expect("Error querying database");
+        let chats = chats.into_iter().map(Chat::from).collect();
 
-    // respond with message time
-    Okay(check_chat::Response::Success {
-        most_recent_message_created: most_recent_message.created,
-    })
-}
+        HttpResponse::Ok().json(list_chats::Response { chats })
+    }
 
-get_chat_error_into!(list_messages::FailureReason);
+    get_chat_error_into!(check_chat::FailureReason);
 
-#[post("/list-messages")]
-async fn list_messages_handler(
-    identity: Identity,
-    body: Json<list_messages::Request>,
-    db: Data<Database>,
-) -> Response<list_messages::Response> {
-    // decode response
-    let body = body.into_inner();
-    println!("/list-messages: {body:#?}");
+    #[post("/check-chat")]
+    async fn check_chat_handler(
+        identity: Identity,
+        body: Json<check_chat::Request>,
+        db: Data<Database>,
+    ) -> Response<check_chat::Response> {
+        // decode response
+        let body = body.into_inner();
+        println!("/check-chat: {body:#?}");
 
-    // get associated chat
-    let mut db = db.get().expect("Database not available");
-    let chat = response_try!(get_chat_by_user(identity, body.chat, &mut db)
-        .map_err(Into::into)
-        .map_err(list_messages::Response::Failure));
+        // get associated chat
+        let mut db = db.get().expect("Database not available");
+        let chat = response_try!(get_chat_by_user(identity, body.chat, &mut db)
+            .map_err(Into::into)
+            .map_err(check_chat::Response::Failure));
 
-    // get messages
-    let messages = messages_dsl::messages
-        .filter(messages_dsl::chat.eq(chat.id))
-        .order(messages_dsl::created.asc())
-        .load(&mut db)
-        .expect("Error querying database");
+        // get most recent message timestamp
+        let Some(most_recent_message): Option<Message> = messages_dsl::messages
+            .filter(messages_dsl::chat.eq(chat.id))
+            .order(messages_dsl::created.desc())
+            .first(&mut db)
+            .optional()
+            .expect("Error querying database")
+        else {
+            return BadRequest(check_chat::Response::Failure(
+                check_chat::FailureReason::ChatHasNoMessages,
+            ));
+        };
 
-    // TODO: fetch in progress messages to deliver to the user as well
+        // respond with message time
+        Okay(check_chat::Response::Success {
+            most_recent_message_created: most_recent_message.created,
+        })
+    }
 
-    Okay(list_messages::Response::Success { messages })
-}
+    get_chat_error_into!(list_messages::FailureReason);
 
-#[get("/list-models")]
-async fn list_models_handler(config: Data<Config>) -> Response<list_models::Response> {
-    // fetch list of models
+    #[post("/list-messages")]
+    async fn list_messages_handler(
+        identity: Identity,
+        body: Json<list_messages::Request>,
+        db: Data<Database>,
+    ) -> Response<list_messages::Response> {
+        // decode response
+        let body = body.into_inner();
+        println!("/list-messages: {body:#?}");
 
-    let client = Client::new();
-    let response = client
-        .get(format!("{}/api/tags", config.llm_api_url))
-        .send()
-        .await
-        .expect("Error communicating with llm api")
-        .bytes()
-        .await
-        .expect("Error collecting response from llm api");
+        // get associated chat
+        let mut db = db.get().expect("Database not available");
+        let chat = response_try!(get_chat_by_user(identity, body.chat, &mut db)
+            .map_err(Into::into)
+            .map_err(list_messages::Response::Failure));
 
-    let response: ollama::tags::Response =
-        serde_json::from_slice(&response).expect("Error deserializing llm api response");
+        // get messages
+        let messages = messages_dsl::messages
+            .filter(messages_dsl::chat.eq(chat.id))
+            .order(messages_dsl::created.asc())
+            .load(&mut db)
+            .expect("Error querying database");
 
-    let list: Vec<String> = response.models.into_iter().map(|m| m.name).collect();
-    let default = list.first().cloned().unwrap_or_default();
-    Okay(list_models::Response { list, default })
+        // TODO: fetch in progress messages to deliver to the user as well
+
+        Okay(list_messages::Response::Success { messages })
+    }
+
+    #[get("/list-models")]
+    async fn list_models_handler(config: Data<Config>) -> Response<list_models::Response> {
+        println!("/list-models");
+        // fetch list of models
+
+        let client = Client::new();
+        let response = client
+            .get(format!("{}/api/tags", config.llm_api_url))
+            .send()
+            .await
+            .expect("Error communicating with llm api")
+            .bytes()
+            .await
+            .expect("Error collecting response from llm api");
+
+        let response: ollama::tags::Response =
+            serde_json::from_slice(&response).expect("Error deserializing llm api response");
+
+        let list: Vec<String> = response.models.into_iter().map(|m| m.name).collect();
+        let default = list.first().cloned().unwrap_or_default();
+        Okay(list_models::Response { list, default })
+    }
+
+    #[post("/model-settings/get")]
+    async fn model_settings_get_handler(
+        identity: Identity,
+        db: Data<Database>,
+        body: Json<model_settings::get::Request>,
+    ) -> Response<model_settings::get::Response> {
+        use model_settings::Scope as RequestScope;
+        use model_settings::SettingsType;
+        use settings::Scope;
+
+        // decode response
+        let body = body.into_inner();
+        println!("/model-settings/get: {body:#?}");
+
+        // get user
+        let mut db = db.get().expect("Error connecting to database");
+        let user = identity.user(&mut db).expect("Error fetching user");
+
+        // determine scope of request
+        let scope = match body {
+            RequestScope::Global(SettingsType::Default) => Scope::Global,
+            RequestScope::Global(SettingsType::Model(model)) => Scope::Model(model),
+            RequestScope::My(SettingsType::Default) => Scope::User(user.id),
+            RequestScope::My(SettingsType::Model(model)) => Scope::UserModel(user.id, model),
+        };
+
+        // retrieve settings
+        let settings = settings::get(&mut db, scope);
+
+        Okay(settings)
+    }
+
+    #[post("/model-settings/set")]
+    async fn model_settings_set_handler(
+        identity: Identity,
+        db: Data<Database>,
+        body: Json<model_settings::set::Request>,
+    ) -> Response<model_settings::set::Response> {
+        use model_settings::Scope as RequestScope;
+        use model_settings::SettingsType;
+        use settings::Scope;
+
+        // decode response
+        let body = body.into_inner();
+        println!("/model-settings/set: {body:#?}");
+
+        // get user
+        let mut db = db.get().expect("Error connecting to database");
+        let user = identity.user(&mut db).expect("Error fetching user");
+
+        // determine if user is allowed to set global settings
+        if let RequestScope::Global(_) = body.scope {
+            if !user.admin {
+                return Unauthorized;
+            }
+        }
+
+        // determine scope of request
+        let scope = match body.scope {
+            RequestScope::Global(SettingsType::Default) => Scope::Global,
+            RequestScope::Global(SettingsType::Model(model)) => Scope::Model(model),
+            RequestScope::My(SettingsType::Default) => Scope::User(user.id),
+            RequestScope::My(SettingsType::Model(model)) => Scope::UserModel(user.id, model),
+        };
+
+        // perform update
+        settings::set(&mut db, scope, body.settings);
+
+        Okay(())
+    }
+
+    #[post("/model-settings/clear")]
+    async fn model_settings_clear_handler(
+        identity: Identity,
+        db: Data<Database>,
+        body: Json<model_settings::clear::Request>,
+    ) -> Response<model_settings::clear::Response> {
+        use model_settings::Scope as RequestScope;
+        use model_settings::SettingsType;
+        use settings::Scope;
+
+        // decode response
+        let body = body.into_inner();
+        println!("/model-settings/clear: {body:#?}");
+
+        // get user
+        let mut db = db.get().expect("Error connecting to database");
+        let user = identity.user(&mut db).expect("Error fetching user");
+
+        // determine if user is allowed to clear global settings
+        if let RequestScope::Global(_) = body {
+            if !user.admin {
+                return Unauthorized;
+            }
+        }
+
+        // determine scope of request
+        let scope = match body {
+            RequestScope::Global(SettingsType::Default) => Scope::Global,
+            RequestScope::Global(SettingsType::Model(model)) => Scope::Model(model),
+            RequestScope::My(SettingsType::Default) => Scope::User(user.id),
+            RequestScope::My(SettingsType::Model(model)) => Scope::UserModel(user.id, model),
+        };
+
+        // perform update
+        settings::clear(&mut db, scope);
+
+        Okay(())
+    }
 }
 
 #[actix_web::main]
@@ -1299,13 +1401,12 @@ async fn main() -> std::io::Result<()> {
     let redis = RedisSessionStore::new(redis_url).await.unwrap();
     println!("Connected to redis");
 
-    // initialize app state, settings & config
+    // initialize app state & config
     let state = State::default();
     let config = Config {
         admin_signup,
         llm_api_url,
     };
-    let settings = Settings::new(pool.clone());
 
     // serve app
     println!("Running on {}", host_addr);
@@ -1314,25 +1415,27 @@ async fn main() -> std::io::Result<()> {
             .app_data(Data::new(pool.clone()))
             .app_data(Data::new(state.clone()))
             .app_data(Data::new(config.clone()))
-            .app_data(Data::new(settings.clone()))
             .wrap(IdentityMiddleware::default())
             .wrap(SessionMiddleware::new(
                 redis.clone(),
                 Key::from(identity_secret.as_bytes()),
             ))
-            .service(ws_handler)
-            .service(admin_signup_handler)
-            .service(create_user_handler)
-            .service(login_handler)
-            .service(logout_handler)
-            .service(me_handler)
-            .service(new_chat_handler)
-            .service(chat_message_handler)
-            .service(update_chat_handler)
-            .service(list_chats_handler)
-            .service(check_chat_handler)
-            .service(list_messages_handler)
-            .service(list_models_handler)
+            .service(api::ws_handler)
+            .service(api::admin_signup_handler)
+            .service(api::create_user_handler)
+            .service(api::login_handler)
+            .service(api::logout_handler)
+            .service(api::me_handler)
+            .service(api::new_chat_handler)
+            .service(api::chat_message_handler)
+            .service(api::update_chat_handler)
+            .service(api::list_chats_handler)
+            .service(api::check_chat_handler)
+            .service(api::list_messages_handler)
+            .service(api::list_models_handler)
+            .service(api::model_settings_get_handler)
+            .service(api::model_settings_set_handler)
+            .service(api::model_settings_clear_handler)
             .service(fs::Files::new("/", "./front/dist").index_file("index.html"))
     })
     .workers(

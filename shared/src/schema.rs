@@ -33,10 +33,11 @@ diesel::table! {
 }
 
 diesel::table! {
-    settings (scope, key) {
+    modelsettings (scope) {
         scope -> Varchar,
-        key -> Varchar,
-        value -> Varchar,
+        temperature -> Float8,
+        context_length -> Int4,
+        system_prompt -> Nullable<Text>,
     }
 }
 
@@ -56,6 +57,6 @@ diesel::joinable!(messages -> chats (chat));
 diesel::allow_tables_to_appear_in_same_query!(
     chats,
     messages,
-    settings,
+    modelsettings,
     users,
 );

@@ -288,8 +288,15 @@ mod session {
     use crate::{host, session::settings::Settings, JsValuable, RcRefCell};
 
     mod settings {
-        use shared::model::User;
+        use gloo_console::error;
+        use shared::{
+            api::model_settings,
+            model::{ModelSettings, User},
+        };
+        use web_sys::HtmlInputElement;
         use yew::prelude::*;
+
+        use super::Loadable::{self, *};
 
         #[derive(Default)]
         pub enum Page {
@@ -301,17 +308,42 @@ mod session {
         pub enum Msg {
             Back,
             Navigate(Page),
+            LoadSettings,
+            UpdateSettings(ModelSettings),
+            SelectModel(Option<String>),
+            SaveSettings,
+            ClearSettings,
+            SetModelSettingsResponse,
+            ClearModelSettingsResponse,
+            ClearPopup,
         }
 
         #[derive(Clone, PartialEq, Properties)]
         pub struct Props {
             pub user: User,
+            pub models: Vec<String>,
             pub on_close: Callback<()>,
         }
 
         #[derive(Default)]
         pub struct Settings {
             page: Page,
+            model_settings: Loadable<ModelSettings>,
+            selected_model: Option<String>,
+            confirmation_popup: Option<String>,
+        }
+
+        impl Settings {
+            fn update_scope(&self) -> model_settings::Scope {
+                let settings_type = match &self.selected_model {
+                    Some(model) => model_settings::SettingsType::Model(model.clone()),
+                    None => model_settings::SettingsType::Default,
+                };
+                match &self.page {
+                    Page::User => model_settings::Scope::My(settings_type),
+                    Page::Admin => model_settings::Scope::Global(settings_type),
+                }
+            }
         }
 
         impl Component for Settings {
@@ -334,12 +366,165 @@ mod session {
                             Page::Admin => Page::User,
                         };
                     }
-                    Msg::Navigate(page) => self.page = page,
+                    Msg::Navigate(page) => {
+                        self.page = page;
+                        self.model_settings = Unloaded;
+                    }
+                    Msg::SelectModel(model) => {
+                        self.selected_model = model;
+                        self.model_settings = Unloaded;
+                    }
+                    Msg::LoadSettings => {
+                        self.model_settings = Loading;
+                        let scope = self.update_scope();
+                        ctx.link().send_future(async move {
+                            Msg::UpdateSettings(json!(post!("/model-settings/get", scope)))
+                        })
+                    }
+                    Msg::UpdateSettings(settings) => {
+                        self.model_settings = Loaded(settings);
+                    }
+                    Msg::SaveSettings => {
+                        let Loaded(model_settings) = &self.model_settings else {
+                            error!("Can't save settings before they're loaded");
+                            return false;
+                        };
+                        let settings = model_settings.clone();
+                        let scope = self.update_scope();
+                        ctx.link().send_future(async move {
+                            post!(
+                                "/model-settings/set",
+                                model_settings::set::Request { settings, scope }
+                            );
+                            Msg::SetModelSettingsResponse
+                        });
+                    }
+                    Msg::ClearSettings => {
+                        let scope = self.update_scope();
+                        ctx.link().send_future(async move {
+                            post!("/model-settings/clear", scope);
+                            Msg::ClearModelSettingsResponse
+                        });
+                    }
+                    Msg::SetModelSettingsResponse => {
+                        self.confirmation_popup = Some("Saved!".to_string());
+                        ctx.link().send_future(async move {
+                            wait!(3 seconds);
+                            Msg::ClearPopup
+                        });
+                    }
+                    Msg::ClearModelSettingsResponse => {
+                        self.confirmation_popup = Some("Reset to defaults.".to_string());
+                        self.model_settings = Unloaded;
+                        ctx.link().send_future(async move {
+                            wait!(3 seconds);
+                            Msg::ClearPopup
+                        });
+                    }
+                    Msg::ClearPopup => {
+                        self.confirmation_popup = None;
+                    }
                 }
                 true
             }
 
             fn view(&self, ctx: &Context<Self>) -> Html {
+                if let Unloaded = self.model_settings {
+                    ctx.link().send_message(Msg::LoadSettings);
+                }
+
+                fn render_model_settings(this: &Settings, ctx: &Context<Settings>) -> Html {
+                    html! {
+                        <>
+                            <select class="model-selection"
+                            onchange={ctx.link().callback(|event: Event| {
+                                let input: HtmlInputElement = event.target_unchecked_into();
+                                let choice = match &*input.value() {
+                                    "default" => None,
+                                    model => Some(model.into()),
+                                };
+                                Msg::SelectModel(choice)
+                            })}>
+                            <option value={"default"} selected={this.selected_model.is_none()}>{"Default Settings"}</option>
+                            {
+                                for ctx.props().models.iter().map(|model| html! {
+                                    <option value={model.clone()} selected={this.selected_model.as_ref() == Some(model)}>{model}</option>
+                                })
+                            }
+                            </select>
+                            <div class="settings-form">
+                                {
+                                    match &this.model_settings {
+                                        Unloaded | Loading => html! {},
+                                        Loaded(model_settings) => {
+                                            html! {
+                                                <>
+                                                    <label for="temperature">{"Temperature"}</label>
+                                                    <input
+                                                        class="setting-input"
+                                                        id="temperature"
+                                                        type="number"
+                                                        value={model_settings.temperature.to_string()}
+                                                        oninput={
+                                                            let model_settings = model_settings.clone();
+                                                            ctx.link().callback(move |e: InputEvent| {
+                                                                let input: HtmlInputElement = e.target_unchecked_into();
+                                                                let mut model_settings = model_settings.clone();
+                                                                model_settings.temperature = input.value().parse().expect("Unexpected temperature format");
+                                                                Msg::UpdateSettings(model_settings)
+                                                            })
+                                                        }
+                                                    />
+                                                    <label for="context_length">{"Maximum Context Length"}</label>
+                                                    <input
+                                                        class="setting-input"
+                                                        id="context_length"
+                                                        type="number"
+                                                        value={model_settings.context_length.to_string()}
+                                                        oninput={
+                                                            let model_settings = model_settings.clone();
+                                                            ctx.link().callback(move |e: InputEvent| {
+                                                                let input: HtmlInputElement = e.target_unchecked_into();
+                                                                let mut model_settings = model_settings.clone();
+                                                                model_settings.context_length = input.value().parse().expect("Unexpected context_length format");
+                                                                Msg::UpdateSettings(model_settings)
+                                                            })
+                                                        }
+                                                    />
+                                                    <label for="system_prompt">{"System Prompt"}</label>
+                                                    <textarea
+                                                        class="setting-input"
+                                                        id="system_prompt"
+                                                        rows=12
+                                                        value={model_settings.system_prompt.clone()}
+                                                        oninput={
+                                                            let model_settings = model_settings.clone();
+                                                            ctx.link().callback(move |e: InputEvent| {
+                                                                let input: HtmlInputElement = e.target_unchecked_into();
+                                                                let mut model_settings = model_settings.clone();
+                                                                let prompt = input.value();
+                                                                model_settings.system_prompt = (!prompt.is_empty()).then_some(prompt);
+                                                                Msg::UpdateSettings(model_settings)
+                                                            })
+                                                        }
+                                                    />
+                                                    <button class="save" onclick={ctx.link().callback(|_| Msg::SaveSettings)}>{"Save"}</button>
+                                                    <button class="clear" onclick={ctx.link().callback(|_| Msg::ClearSettings)}>{"Reset to default"}</button>
+                                                    {
+                                                        this.confirmation_popup.as_ref().map(|message| html! {
+                                                            <span>{message}</span>
+                                                        })
+                                                    }
+                                                </>
+                                            }
+                                        }
+                                    }
+                                }
+                            </div>
+                        </>
+                    }
+                }
+
                 html! {
                     <div class="settings">
                         <div class="header">
@@ -350,7 +535,9 @@ mod session {
                                 Page::User => {
                                     html! {
                                         <div class="user">
-                                            <h2>{"User Settings Go Here"}</h2>
+                                            <h2>{"Settings"}</h2>
+                                            <h3>{"Model Settings"}</h3>
+                                            {render_model_settings(self, ctx)}
                                             {
                                                 ctx.props().user.admin.then_some(html! {
                                                     <button class="go-to-admin" onclick={ctx.link().callback(|_| Msg::Navigate(Page::Admin))}>
@@ -364,7 +551,9 @@ mod session {
                                 Page::Admin => {
                                     html! {
                                         <div class="admin">
-                                            <h2>{"Admin Settings Go Here"}</h2>
+                                            <h2>{"Admin Settings"}</h2>
+                                            <h3>{"Global Model Settings"}</h3>
+                                            {render_model_settings(self, ctx)}
                                         </div>
                                     }
                                 }
@@ -1218,8 +1407,15 @@ mod session {
                                         MainView::Settings => {
                                             let user = ctx.props().user.clone();
                                             let on_close = ctx.link().callback(|_| Msg::CloseSetting);
-                                            html! {
-                                                <Settings {user} {on_close} />
+                                            if let Loaded(model_selection) = &self.model_selection {
+                                                let models = model_selection.models.clone();
+                                                html! {
+                                                    <Settings {user} {on_close} {models} />
+                                                }
+                                            } else {
+                                                html! {
+                                                    <span>{"Loading settings..."}</span>
+                                                }
                                             }
                                         }
                                         _ => html! {
