@@ -1360,73 +1360,128 @@ mod session {
             html! {
                 <div class="session" onclick={ctx.link().callback(|_| Msg::ProfileModal(false))}>
                     <div class="sidebar">
-                        <div class="tabs">
-                            {
-                                for vec![
-                                    ("chats", SidebarTab::Chats),
-                                    ("workspaces", SidebarTab::Workspaces),
-                                    ("assistants", SidebarTab::Assistants),
-                                    ("characters", SidebarTab::Characters),
-                                ].into_iter().map(|(name, tab)| 
-                                    html! {
-                                        <div
-                                            class={classes!(name, "tab", (self.sidebar_tab == tab).then_some("selected"))}
-                                            onclick={ctx.link().callback(move |_| Msg::SelectTab(tab.clone()))}
-                                        >
-                                            <img src={format!("./static/icons/{}.svg", name)} />
-                                        </div>
-                                    }
-                                )
-                            }
-                        </div>
-                        <div class="chats-list-container">
-                            <div class="new-chat">
-                                <button onclick={ctx.link().callback(|_| Msg::NewChat)}>{" + New Chat"}</button>
-                            </div>
-                            <div class="horizontal divider"></div>
-                            <div class="chats-list scrollable">
+                        <div class="tabs-and-list-container">
+                            <div class="tabs">
                                 {
-                                    match &self.chats {
-                                        Unloaded | Loading => html! {
-                                            <div class="loading-chats"></div>
-                                        },
-                                        Loaded(loaded_chats) =>
-                                        loaded_chats.chat_list.iter().rev().map(|chat| {
-                                            let onclick = {
-                                                let chat = chat.clone();
-                                                ctx.link().callback(move |_| Msg::SelectChat(chat.clone()))
-                                            };
-                                            let selected = match &self.main_view {
-                                                MainView::Chat(current) => Rc::ptr_eq(chat, current),
-                                                _ => false
-                                            };
-                                            let chat = RefCell::borrow(chat);
-                                            let key = chat.key;
-                                            html! {
-                                                <div class={classes!("chat", selected.then_some("selected"))} {key} {onclick}>{&chat.name()}</div>
-                                            }
-                                        }).collect::<Html>(),
-                                    }
+                                    for vec![
+                                        ("chats", SidebarTab::Chats),
+                                        ("workspaces", SidebarTab::Workspaces),
+                                        ("assistants", SidebarTab::Assistants),
+                                        ("characters", SidebarTab::Characters),
+                                    ].into_iter().map(|(name, tab)|
+                                        html! {
+                                            <div
+                                                class={classes!(name, "tab", (self.sidebar_tab == tab).then_some("selected"))}
+                                                onclick={ctx.link().callback(move |_| Msg::SelectTab(tab.clone()))}
+                                            >
+                                                <img src={format!("./static/icons/{}.svg", name)} />
+                                            </div>
+                                        }
+                                    )
                                 }
                             </div>
-                            <div class="horizontal divider"></div>
-                            <div class="profile">
-                                <button onclick={
-                                    let new_profile_modal = !self.profile_modal;
-                                    ctx.link().callback(move |e: MouseEvent| {
-                                        e.prevent_default();
-                                        e.stop_propagation();
-                                        e.stop_immediate_propagation();
-                                        Msg::ProfileModal(new_profile_modal)
-                                    })
-                                }>
-                                    <img class="icon" src="./static/icons/user.svg" />
-                                    <span class="name">{ctx.props().user.username.clone()}</span>
-                                </button>
-                                <div class={classes!("modal", self.profile_modal.then_some("open"))}>
-                                    <button onclick={ctx.link().callback(|_| Msg::OpenSettings)}>{"Settings"}</button>
-                                    <button onclick={ctx.link().callback(|_| Msg::Logout)}>{"Logout"}</button>
-                                </div>
+                            {
+                                match &self.sidebar_tab {
+                                    SidebarTab::Chats => html! {
+                                        <div class="chats-list-container list-container">
+                                            <div class="new-chat new-item">
+                                                <button onclick={ctx.link().callback(|_| Msg::NewChat)}>{" + New Chat"}</button>
+                                            </div>
+                                            <div class="horizontal divider"></div>
+                                            <div class="chats-list list scrollable">
+                                                {
+                                                    match &self.chats {
+                                                        Unloaded | Loading => html! {
+                                                            <div class="loading-chats"></div>
+                                                        },
+                                                        Loaded(loaded_chats) =>
+                                                        loaded_chats.chat_list.iter().rev().map(|chat| {
+                                                            let onclick = {
+                                                                let chat = chat.clone();
+                                                                ctx.link().callback(move |_| Msg::SelectChat(chat.clone()))
+                                                            };
+                                                            let selected = match &self.main_view {
+                                                                MainView::Chat(current) => Rc::ptr_eq(chat, current),
+                                                                _ => false
+                                                            };
+                                                            let chat = RefCell::borrow(chat);
+                                                            let key = chat.key;
+                                                            html! {
+                                                                <div class={classes!("chat", "list-card", selected.then_some("selected"))} {key} {onclick}>{&chat.name()}</div>
+                                                            }
+                                                        }).collect::<Html>(),
+                                                    }
+                                                }
+                                            </div>
+                                        </div>
+                                    },
+                                    SidebarTab::Workspaces => html! {
+                                        <div class="list-container workspaces-list-container">
+                                            <div class="new-workspace new-item">
+                                                <button onclick={ctx.link().callback(|_| Msg::NewChat)}>{" + New Workspace"}</button>
+                                            </div>
+                                            <div class="horizontal divider"></div>
+                                            <div class="workspaces-list list scrollable">
+                                                {
+                                                    for vec!["Workspace A", "Workspace B", "Workspace C"].into_iter().enumerate().map(|(key, name)| html! {
+                                                        <div class={classes!("workspace", "list-card")} {key}>{name}</div>
+                                                    })
+                                                }
+                                            </div>
+                                        </div>
+                                    },
+                                    SidebarTab::Assistants => html! {
+                                        <div class="list-container assistants-list-container">
+                                            <div class="new-assistant new-item">
+                                                <button onclick={ctx.link().callback(|_| Msg::NewChat)}>{" + New Assistant"}</button>
+                                            </div>
+                                            <div class="horizontal divider"></div>
+                                            <div class="assistants-list list scrollable">
+                                                {
+                                                    for vec!["Assistant A", "Assistant B", "Assistant C"].into_iter().enumerate().map(|(key, name)| html! {
+                                                        <div class={classes!("assistant", "list-card")} {key}>{name}</div>
+                                                    })
+                                                }
+                                            </div>
+                                        </div>
+                                    },
+                                    SidebarTab::Characters =>  html! {
+                                        <div class="list-container characters-list-container">
+                                            <div class="new-character new-item">
+                                                <button onclick={ctx.link().callback(|_| Msg::NewChat)}>{" + New Character"}</button>
+                                            </div>
+                                            <div class="horizontal divider"></div>
+                                            <div class="characters-list list scrollable">
+                                                {
+                                                    for vec!["Character A", "Character B", "Character C"].into_iter().enumerate().map(|(key, name)| html! {
+                                                        <div class={classes!("character", "list-card")} {key}>{name}</div>
+                                                    })
+                                                }
+                                            </div>
+                                        </div>
+                                    },
+                                }
+                            }
+
+                        </div>
+                        <div class="horizontal spacer"></div>
+                        <div class="horizontal divider"></div> // idk if i actually like this
+                        <div class="profile">
+                            <button onclick={
+                                let new_profile_modal = !self.profile_modal;
+                                ctx.link().callback(move |e: MouseEvent| {
+                                    e.prevent_default();
+                                    e.stop_propagation();
+                                    e.stop_immediate_propagation();
+                                    Msg::ProfileModal(new_profile_modal)
+                                })
+                            }>
+                                <img class="icon" src="./static/icons/user.svg" />
+                                <span class="name">{ctx.props().user.username.clone()}</span>
+                            </button>
+                            <div class={classes!("modal", self.profile_modal.then_some("open"))}>
+                                <button onclick={ctx.link().callback(|_| Msg::OpenSettings)}>{"Settings"}</button>
+                                <button onclick={ctx.link().callback(|_| Msg::Logout)}>{"Logout"}</button>
                             </div>
                         </div>
                     </div>
