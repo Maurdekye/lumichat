@@ -1336,62 +1336,69 @@ mod session {
                 }
             }
 
-            // log!(format!("model selection: {:#?}", &self.model_selection));
-
             // render page
             let input_disabled = match &self.main_view {
                 MainView::Chat(chat) => !RefCell::borrow(chat).is_available(),
                 _ => false,
             };
+
             html! {
                 <div class="session" onclick={ctx.link().callback(|_| Msg::ProfileModal(false))}>
                     <div class="sidebar">
-                        <div class="new-chat">
-                            <button onclick={ctx.link().callback(|_| Msg::NewChat)}>{" + New Chat"}</button>
+                        <div class="tabs">
+                            <div class="chats tab"></div>
+                            <div class="workspaces tab"></div>
+                            <div class="assistants tab"></div>
+                            <div class="characters tab"></div>
                         </div>
-                        <div class="horizontal divider"></div>
-                        <div class="chats-list scrollable">
-                            {
-                                match &self.chats {
-                                    Unloaded | Loading => html! {
-                                        <div class="loading-chats"></div>
-                                    },
-                                    Loaded(loaded_chats) =>
-                                    loaded_chats.chat_list.iter().rev().map(|chat| {
-                                        let onclick = {
-                                            let chat = chat.clone();
-                                            ctx.link().callback(move |_| Msg::SelectChat(chat.clone()))
-                                        };
-                                        let selected = match &self.main_view {
-                                            MainView::Chat(current) => Rc::ptr_eq(chat, current),
-                                            _ => false
-                                        };
-                                        let chat = RefCell::borrow(chat);
-                                        let key = chat.key;
-                                        html! {
-                                            <div class={classes!("chat", selected.then_some("selected"))} {key} {onclick}>{&chat.name()}</div>
-                                        }
-                                    }).collect::<Html>(),
+                        <div class="chats-list-container">
+                            <div class="new-chat">
+                                <button onclick={ctx.link().callback(|_| Msg::NewChat)}>{" + New Chat"}</button>
+                            </div>
+                            <div class="horizontal divider"></div>
+                            <div class="chats-list scrollable">
+                                {
+                                    match &self.chats {
+                                        Unloaded | Loading => html! {
+                                            <div class="loading-chats"></div>
+                                        },
+                                        Loaded(loaded_chats) =>
+                                        loaded_chats.chat_list.iter().rev().map(|chat| {
+                                            let onclick = {
+                                                let chat = chat.clone();
+                                                ctx.link().callback(move |_| Msg::SelectChat(chat.clone()))
+                                            };
+                                            let selected = match &self.main_view {
+                                                MainView::Chat(current) => Rc::ptr_eq(chat, current),
+                                                _ => false
+                                            };
+                                            let chat = RefCell::borrow(chat);
+                                            let key = chat.key;
+                                            html! {
+                                                <div class={classes!("chat", selected.then_some("selected"))} {key} {onclick}>{&chat.name()}</div>
+                                            }
+                                        }).collect::<Html>(),
+                                    }
                                 }
-                            }
-                        </div>
-                        <div class="horizontal divider"></div>
-                        <div class="profile">
-                            <button onclick={
-                                let new_profile_modal = !self.profile_modal;
-                                ctx.link().callback(move |e: MouseEvent| {
-                                    e.prevent_default();
-                                    e.stop_propagation();
-                                    e.stop_immediate_propagation();
-                                    Msg::ProfileModal(new_profile_modal)
-                                })
-                            }>
-                                <img class="icon" src="./static/user_icon.svg" />
-                                <span class="name">{ctx.props().user.username.clone()}</span>
-                            </button>
-                            <div class={classes!("modal", self.profile_modal.then_some("open"))}>
-                                <button onclick={ctx.link().callback(|_| Msg::OpenSettings)}>{"Settings"}</button>
-                                <button onclick={ctx.link().callback(|_| Msg::Logout)}>{"Logout"}</button>
+                            </div>
+                            <div class="horizontal divider"></div>
+                            <div class="profile">
+                                <button onclick={
+                                    let new_profile_modal = !self.profile_modal;
+                                    ctx.link().callback(move |e: MouseEvent| {
+                                        e.prevent_default();
+                                        e.stop_propagation();
+                                        e.stop_immediate_propagation();
+                                        Msg::ProfileModal(new_profile_modal)
+                                    })
+                                }>
+                                    <img class="icon" src="./static/user_icon.svg" />
+                                    <span class="name">{ctx.props().user.username.clone()}</span>
+                                </button>
+                                <div class={classes!("modal", self.profile_modal.then_some("open"))}>
+                                    <button onclick={ctx.link().callback(|_| Msg::OpenSettings)}>{"Settings"}</button>
+                                    <button onclick={ctx.link().callback(|_| Msg::Logout)}>{"Logout"}</button>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -1405,9 +1412,9 @@ mod session {
                                 {
                                     match &self.main_view {
                                         MainView::Settings => {
-                                            let user = ctx.props().user.clone();
-                                            let on_close = ctx.link().callback(|_| Msg::CloseSetting);
                                             if let Loaded(model_selection) = &self.model_selection {
+                                                let user = ctx.props().user.clone();
+                                                let on_close = ctx.link().callback(|_| Msg::CloseSetting);
                                                 let models = model_selection.models.clone();
                                                 html! {
                                                     <Settings {user} {on_close} {models} />

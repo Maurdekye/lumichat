@@ -1,6 +1,6 @@
 $primary: rgb(26, 26, 26);
 $secondary: rgb(36, 36, 36);
-$tertiary: rgb(68, 68, 68);
+$tertiary: rgb(42, 42, 42);
 $trim: rgb(79, 78, 78);
 $trim-light: rgb(157, 157, 157);
 
@@ -42,7 +42,7 @@ $error-text: rgb(216, 110, 83);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba($color: $tertiary, $alpha: 0.75);
+  background: rgba($color: $interact, $alpha: 0.75);
   border-radius: 0.2em;
 }
 
@@ -132,7 +132,8 @@ html, body {
   }
 }
 
-$sidebar-width: 14em;
+$tabs-width: 3em;
+$chats-list-width: 14em;
 
 .session {
   width: 100vw;
@@ -143,8 +144,8 @@ $sidebar-width: 14em;
   .sidebar {
     position: absolute;
     display: flex;
-    flex-flow: column;
-    width: $sidebar-width;
+    flex-flow: row;
+    width: calc($tabs-width + $chats-list-width);
     height: 100%;
     background-color: $secondary;
     overflow-x: hidden;
@@ -155,83 +156,105 @@ $sidebar-width: 14em;
       border-width: 0;
     }
 
-    .new-chat {
-      display: flex;
-      height: 3em;
+    .tabs {
+      background-color: $tertiary;
 
-      button {
-        flex: 1;
-        width: 100%;
-        height: 100%;
-        border: none;
-        padding: 0;
+      .tab {
+        $margin: 0.4em;
+        width: calc($tabs-width - $margin);
+        height: calc($tabs-width - $margin);
+        margin: $margin;
+        border-radius: 0.4em;
+        
+        &:hover {
+          background-color: $interact;
+        }
       }
     }
 
-    .chats-list {
+    .chats-list-container {
       flex: 1;
       display: flex;
       flex-flow: column;
-      max-height: 100%;
 
-      .chat {
-        align-items: center;
-        margin: 0.4em 0em 0 0.2em;
-        padding: 0.6em;
-        border-radius: 0.4em;
-        border: none;
-        cursor: pointer;
-        transition-duration: 0.2s;
-
-        &.selected {
-          background-color: $interact;
-        }
-
-        &:hover {
-          background-color: $card;
-          box-shadow: 0em 0em 1em 0.1em rgba($color: #000000, $alpha: 0.1);
+      .new-chat {
+        display: flex;
+        height: 3em;
+  
+        button {
+          flex: 1;
+          width: 100%;
+          height: 100%;
+          border: none;
+          padding: 0;
         }
       }
-    }
-
-    .profile {
-      display: flex;
-      height: 4em;
-      align-items: center;
-      justify-content: center;
-      position: relative;
-
-      button {
-        border: none;
-        padding: 1em;
+  
+      .chats-list {
+        flex: 1;
         display: flex;
-        flex-flow: row;
+        flex-flow: column;
+        max-height: 100%;
+  
+        .chat {
+          align-items: center;
+          margin: 0.6em 0 0 0.6em;
+          padding: 0.6em;
+          border-radius: 0.4em;
+          border: none;
+          cursor: pointer;
+          transition-duration: 0.2s;
+  
+          &.selected {
+            background-color: $interact;
+          }
+  
+          &:hover {
+            background-color: $card;
+            box-shadow: 0em 0em 1em 0.1em rgba($color: #000000, $alpha: 0.1);
+          }
+        }
+      }
+  
+      .profile {
+        display: flex;
+        height: 4em;
         align-items: center;
         justify-content: center;
-
-        .icon {
-          width: 1.75em;
-          height: 1.75em;
-          margin-right: 1em;
-        }
-      }
-
-      .modal {
-        position: absolute;
-        display: none;
-        align-items: center;
-        flex-flow: column;
-        z-index: -1;
-        background-color: $secondary;
-        border-radius: 0.8em;
-        transform: translate(0, -100%);
-        box-shadow: 0.1em 0.3em 1.5em rgba($color: black, $alpha: 0.6);
-
-        transition-duration: 0.2s;
-
-        &.open {
+        position: relative;
+  
+        button {
+          border: none;
+          padding: 1em;
           display: flex;
-          z-index: 20;
+          flex-flow: row;
+          align-items: center;
+          justify-content: center;
+  
+          .icon {
+            width: 1.75em;
+            height: 1.75em;
+            margin-right: 1em;
+          }
+        }
+  
+        .modal {
+          position: absolute;
+          display: none;
+          align-items: center;
+          flex-flow: column;
+          z-index: -1;
+          background-color: $secondary;
+          border-radius: 0.8em;
+          transform: translate(0, -100%);
+          box-shadow: 0.1em 0.3em 1.5em rgba($color: black, $alpha: 0.6);
+  
+          transition-duration: 0.2s;
+  
+          &.open {
+            display: flex;
+            z-index: 20;
+          }
         }
       }
     }
@@ -249,7 +272,7 @@ $sidebar-width: 14em;
     pointer-events: none;
 
     .sidebar-window {
-      width: $sidebar-width;
+      width: calc($tabs-width + $chats-list-width);
       pointer-events: none;
 
       transition: width 0.6s;
