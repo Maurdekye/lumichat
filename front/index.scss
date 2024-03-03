@@ -561,3 +561,18 @@ select {
     grid-row: 10;
   }
 }
+
+.code {
+  background-color: rgb(32, 32, 32);
+  border-radius: 0.5em;
+  font-family: monospace;
+}
+
+pre.code {
+  padding: 1em;
+  display: inline-block;
+}
+
+span.code {
+  padding: 0.3em;
+}

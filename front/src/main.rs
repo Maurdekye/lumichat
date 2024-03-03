@@ -279,6 +279,9 @@ mod session {
     use futures::StreamExt;
     use gloo_console::{error, log};
     use gloo_net::websocket::futures::WebSocket;
+    use pulldown_cmark::{
+        CodeBlockKind, Event as MarkdownEvent, HeadingLevel, Options, Parser, Tag,
+    };
     use shared::{
         api::{chat_message, list_chats, list_messages, list_models, new_chat, update_chat},
         model::{self, AuthorType, ChatId, MessageId, User},
@@ -565,6 +568,117 @@ mod session {
                 }
             }
         }
+    }
+
+    fn render_markdown<'a>(content: &'a str) -> Html {
+        let mut options = Options::empty();
+        options.insert(Options::ENABLE_STRIKETHROUGH);
+        let parser = Parser::<'a>::new_ext(content, options);
+        let mut stack: Vec<(Option<Tag<'a>>, Vec<Html>)> = vec![(None, Vec::new())];
+        for event in parser {
+            match event {
+                MarkdownEvent::Start(tag) => stack.push((Some(tag), Vec::new())),
+                MarkdownEvent::End(_) => {
+                    let (open_tag, inner) = stack.pop().unwrap();
+                    let new_html = match open_tag {
+                        None => html! {<>{inner}</>},
+                        Some(open_tag) => match open_tag {
+                            Tag::Paragraph => html! { <p>{inner}</p> },
+                            Tag::Heading { level, .. } => match level {
+                                HeadingLevel::H1 => html! { <h1>{inner}</h1> },
+                                HeadingLevel::H2 => html! { <h2>{inner}</h2> },
+                                HeadingLevel::H3 => html! { <h3>{inner}</h3> },
+                                HeadingLevel::H4 => html! { <h4>{inner}</h4> },
+                                HeadingLevel::H5 => html! { <h5>{inner}</h5> },
+                                HeadingLevel::H6 => html! { <h6>{inner}</h6> },
+                            },
+                            Tag::BlockQuote => html! { <span class="quote">{inner}</span> },
+                            Tag::CodeBlock(block_type) => {
+                                let lang = match block_type {
+                                    CodeBlockKind::Indented => None,
+                                    CodeBlockKind::Fenced(lang) => {
+                                        if lang.is_empty() {
+                                            Some(lang)
+                                        } else {
+                                            None
+                                        }
+                                    }
+                                };
+                                match lang {
+                                    Some(lang) => {
+                                        html! { <pre class="code" data-language={lang.to_string()}>{inner}</pre> }
+                                    }
+                                    None => html! { <pre class="code">{inner}</pre> },
+                                }
+                            }
+                            Tag::HtmlBlock => html! {<>{inner}</>},
+                            Tag::List(start) => match start {
+                                Some(start) => html! {<ol start={start.to_string()}>{inner}</ol>},
+                                None => html! {<ul>{inner}</ul>},
+                            },
+                            Tag::Item => html! {<li>{inner}</li>},
+                            Tag::FootnoteDefinition(label) => {
+                                html! { <sup id={label.to_string()}>{inner}</sup> }
+                            }
+                            Tag::Table(_) => html! {<table>{inner}</table>},
+                            Tag::TableHead => html! {<th>{inner}</th>},
+                            Tag::TableRow => html! {<tr>{inner}</tr>},
+                            Tag::TableCell => html! {<td>{inner}</td>},
+                            Tag::Emphasis => html! {<em>{inner}</em>},
+                            Tag::Strong => html! {<strong>{inner}</strong>},
+                            Tag::Strikethrough => html! {<s>{inner}</s>},
+                            Tag::Link { dest_url, .. } => {
+                                html! {<a href={dest_url.to_string()}>{inner}</a>}
+                            }
+                            Tag::Image {
+                                dest_url, title, ..
+                            } => html! {<img src={dest_url.to_string()} alt={title.to_string()} />},
+                            Tag::MetadataBlock(_) => html! {},
+                        },
+                    };
+                    let (_, top) = stack.last_mut().unwrap();
+                    top.push(new_html);
+                }
+                MarkdownEvent::Text(text)
+                | MarkdownEvent::Html(text)
+                | MarkdownEvent::InlineHtml(text) => {
+                    stack.last_mut().unwrap().1.push(html! {<>{text}</>});
+                }
+                MarkdownEvent::Code(code) => {
+                    stack
+                        .last_mut()
+                        .unwrap()
+                        .1
+                        .push(html! {<span class="code">{code.to_string()}</span>});
+                }
+                MarkdownEvent::FootnoteReference(reference) => {
+                    stack.last_mut().unwrap().1.push(
+                        html! {<a href={format!("#{}", reference)}>{reference.to_string()}</a>},
+                    )
+                }
+                MarkdownEvent::SoftBreak => {
+                    stack.last_mut().unwrap().1.push(
+                        html! {<>{"\n"}</>},
+                    )
+                }
+                MarkdownEvent::HardBreak => {
+                    stack.last_mut().unwrap().1.push(
+                        html! {<br />},
+                    )
+                },
+                MarkdownEvent::Rule => {
+                    stack.last_mut().unwrap().1.push(
+                        html! {<hr />},
+                    )
+                },
+                MarkdownEvent::TaskListMarker(checked) => {
+                    stack.last_mut().unwrap().1.push(
+                        html! {<input type="checkbox" {checked} disabled={true} />},
+                    )
+                },
+            }
+        }
+        html! {<>{stack.pop().unwrap().1}</>}
     }
 
     type ElemKey = u64;
@@ -1556,7 +1670,7 @@ mod session {
                                                                     <img class="icon" src={profile_icon}/>
                                                                     <span class={classes!("name", error)}>{author_name}</span>
                                                                 </div>
-                                                                <div class={classes!("message", error)}>{content}</div>
+                                                                <div class={classes!("message", error)}>{render_markdown(content)}</div>
                                                             </div>
                                                         }
                                                     }
@@ -1629,7 +1743,7 @@ mod session {
                                                         onclick={
                                                             let message_input = self.message_input.clone();
                                                             ctx.link().batch_callback(move |_| {
-                                                                (!message_input.is_empty()).then_some(Msg::SubmitMessage)
+                                                                (!message_input.is_empty() && !input_disabled).then_some(Msg::SubmitMessage)
                                                             })
                                                         }
                                                     >
@@ -1647,10 +1761,10 @@ mod session {
 
                                                     <label class="left row-2" for="temperature">{"Temperature"}</label>
                                                     <input class="right row-2" type="number" name="temperature" />
-                                                    
+
                                                     <label class="left row-3" for="system_prompt">{"System Prompt"}</label>
                                                     <textarea class="right row-3" rows=12 name="system_prompt" />
-                                                    
+
                                                     <label class="left row-4" for="files">{"Files"}</label>
                                                     <ul class="right row-4" name="files">
                                                         <li>{"File 1"}</li>
@@ -1678,16 +1792,16 @@ mod session {
 
                                                     <label class="left row-2" for="temperature">{"Temperature"}</label>
                                                     <input class="right row-2" type="number" name="temperature" />
-                                                    
+
                                                     <label class="left row-3" for="system_prompt">{"System Prompt"}</label>
                                                     <textarea class="right row-3" rows=12 name="system_prompt" />
-                                                    
+
                                                     <label class="left row-4" for="personality">{"Personality"}</label>
                                                     <textarea class="right row-4" rows=8 name="personality" />
-                                                    
+
                                                     <label class="left row-5" for="goal">{"Goal"}</label>
                                                     <textarea class="right row-5" rows=8 name="goal" />
-                                                    
+
                                                     <label class="left row-6" for="profile_picture">{"Profile Picture"}</label>
                                                     <input class="right row-6" type="file" name="profile_picture" accept="image/*"/>
 
@@ -1704,25 +1818,25 @@ mod session {
 
                                                     <label class="left row-2" for="temperature">{"Temperature"}</label>
                                                     <input class="right row-2" type="number" name="temperature" />
-                                                    
+
                                                     <label class="left row-3" for="system_prompt">{"System Prompt"}</label>
                                                     <textarea class="right row-3" rows=12 name="system_prompt" />
-                                                    
+
                                                     <label class="left row-4" for="personality">{"Personality"}</label>
                                                     <textarea class="right row-4" rows=8 name="personality" />
-                                                    
+
                                                     <label class="left row-5" for="appearance">{"Appearance"}</label>
                                                     <textarea class="right row-5" rows=8 name="appearance" />
-                                                    
+
                                                     <label class="left row-6" for="scenario">{"Scenario"}</label>
                                                     <textarea class="right row-6" rows=8 name="scenario" />
-                                                    
+
                                                     <label class="left row-7" for="thought_process">{"Thought Process"}</label>
                                                     <textarea class="right row-7" rows=8 name="thought_process" />
-                                                    
+
                                                     <label class="left row-8" for="greeting">{"Greeting"}</label>
                                                     <textarea class="right row-8" rows=8 name="greeting" />
-                                                    
+
                                                     <label class="left row-9" for="profile_picture">{"Profile Picture"}</label>
                                                     <input class="right row-9" type="file" name="profile_picture" accept="image/*"/>
 
