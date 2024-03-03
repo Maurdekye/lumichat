@@ -708,6 +708,15 @@ mod session {
         models: Vec<String>,
     }
 
+    #[derive(Clone, Debug, Default, PartialEq)]
+    pub enum SidebarTab {
+        #[default]
+        Chats,
+        Workspaces,
+        Assistants,
+        Characters,
+    }
+
     #[derive(Debug, Default)]
     pub enum MainView {
         #[default]
@@ -721,6 +730,7 @@ mod session {
         sidebar_collapsed: bool,
         profile_modal: bool,
         chats: Loadable<Chats>,
+        sidebar_tab: SidebarTab,
         main_view: MainView,
         message_input: String,
         websocket: Loadable<WebsocketWriter>,
@@ -738,6 +748,8 @@ mod session {
         OpenSettings,
         CloseSetting,
         ProfileModal(bool),
+        SelectTab(SidebarTab),
+
         ChatMessageResponse {
             chat: Rc<RefCell<Chat>>,
             response: chat_message::Response,
@@ -763,56 +775,56 @@ mod session {
         WebsocketDisconnect,
     }
 
-    impl Debug for Msg {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            match self {
-                Self::Logout => write!(f, "Logout"),
-                Self::ToggleSidebar => write!(f, "ToggleSidebar"),
-                Self::NewChat => write!(f, "NewChat"),
-                Self::SelectChat(arg0) => f.debug_tuple("SelectChat").field(arg0).finish(),
-                Self::UpdateMessage(arg0) => f.debug_tuple("UpdateMessage").field(arg0).finish(),
-                Self::SubmitMessage => write!(f, "SubmitMessage"),
-                Self::SelectModel(arg0) => f.debug_tuple("SelectModel").field(arg0).finish(),
-                Self::OpenSettings => f.debug_tuple("OpenSettings").finish(),
-                Self::CloseSetting => f.debug_tuple("CloseSetting").finish(),
-                Self::ProfileModal(arg0) => f.debug_tuple("ProfileModal").field(arg0).finish(),
-                Self::ChatMessageResponse {
-                    chat,
-                    response,
-                    user_message_key,
-                } => f
-                    .debug_struct("ChatMessageResponse")
-                    .field("chat", chat)
-                    .field("response", response)
-                    .field("user_message_key", user_message_key)
-                    .finish(),
-                Self::NewChatResponse {
-                    response,
-                    chat_key,
-                    user_message_key,
-                } => f
-                    .debug_struct("NewChatResponse")
-                    .field("response", response)
-                    .field("chat_key", chat_key)
-                    .field("user_message_key", user_message_key)
-                    .finish(),
-                Self::LoadChats => write!(f, "LoadChats"),
-                Self::LoadedChats(arg0) => f.debug_tuple("LoadedChats").field(arg0).finish(),
-                Self::LoadMessages(arg0) => f.debug_tuple("LoadMessages").field(arg0).finish(),
-                Self::LoadedMessages { chat, response } => f
-                    .debug_struct("LoadedMessages")
-                    .field("chat", chat)
-                    .field("response", response)
-                    .finish(),
-                Self::LoadModels => write!(f, "LoadModels"),
-                Self::LoadedModels(arg0) => f.debug_tuple("LoadedModels").field(arg0).finish(),
-                Self::WebsocketTryConnect => write!(f, "WebsocketTryConnect"),
-                Self::WebsocketConnected(_) => f.debug_tuple("WebsocketConnected").finish(),
-                Self::WebsocketData(arg0) => f.debug_tuple("WebsocketData").field(arg0).finish(),
-                Self::WebsocketDisconnect => write!(f, "WebsocketDisconnect"),
-            }
-        }
-    }
+    // impl Debug for Msg {
+    //     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    //         match self {
+    //             Self::Logout => write!(f, "Logout"),
+    //             Self::ToggleSidebar => write!(f, "ToggleSidebar"),
+    //             Self::NewChat => write!(f, "NewChat"),
+    //             Self::SelectChat(arg0) => f.debug_tuple("SelectChat").field(arg0).finish(),
+    //             Self::UpdateMessage(arg0) => f.debug_tuple("UpdateMessage").field(arg0).finish(),
+    //             Self::SubmitMessage => write!(f, "SubmitMessage"),
+    //             Self::SelectModel(arg0) => f.debug_tuple("SelectModel").field(arg0).finish(),
+    //             Self::OpenSettings => f.debug_tuple("OpenSettings").finish(),
+    //             Self::CloseSetting => f.debug_tuple("CloseSetting").finish(),
+    //             Self::ProfileModal(arg0) => f.debug_tuple("ProfileModal").field(arg0).finish(),
+    //             Self::ChatMessageResponse {
+    //                 chat,
+    //                 response,
+    //                 user_message_key,
+    //             } => f
+    //                 .debug_struct("ChatMessageResponse")
+    //                 .field("chat", chat)
+    //                 .field("response", response)
+    //                 .field("user_message_key", user_message_key)
+    //                 .finish(),
+    //             Self::NewChatResponse {
+    //                 response,
+    //                 chat_key,
+    //                 user_message_key,
+    //             } => f
+    //                 .debug_struct("NewChatResponse")
+    //                 .field("response", response)
+    //                 .field("chat_key", chat_key)
+    //                 .field("user_message_key", user_message_key)
+    //                 .finish(),
+    //             Self::LoadChats => write!(f, "LoadChats"),
+    //             Self::LoadedChats(arg0) => f.debug_tuple("LoadedChats").field(arg0).finish(),
+    //             Self::LoadMessages(arg0) => f.debug_tuple("LoadMessages").field(arg0).finish(),
+    //             Self::LoadedMessages { chat, response } => f
+    //                 .debug_struct("LoadedMessages")
+    //                 .field("chat", chat)
+    //                 .field("response", response)
+    //                 .finish(),
+    //             Self::LoadModels => write!(f, "LoadModels"),
+    //             Self::LoadedModels(arg0) => f.debug_tuple("LoadedModels").field(arg0).finish(),
+    //             Self::WebsocketTryConnect => write!(f, "WebsocketTryConnect"),
+    //             Self::WebsocketConnected(_) => f.debug_tuple("WebsocketConnected").finish(),
+    //             Self::WebsocketData(arg0) => f.debug_tuple("WebsocketData").field(arg0).finish(),
+    //             Self::WebsocketDisconnect => write!(f, "WebsocketDisconnect"),
+    //         }
+    //     }
+    // }
 
     #[derive(Clone, PartialEq, Properties)]
     pub struct Props {
@@ -829,7 +841,7 @@ mod session {
         }
 
         fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
-            log!(format!("msg = {msg:#?}"));
+            // log!(format!("msg = {msg:#?}"));
             match msg {
                 Msg::Logout => {
                     let on_logout = ctx.props().on_logout.clone();
@@ -977,6 +989,9 @@ mod session {
                 }
                 Msg::ProfileModal(open) => {
                     self.profile_modal = open;
+                }
+                Msg::SelectTab(tab) => {
+                    self.sidebar_tab = tab;
                 }
                 Msg::ChatMessageResponse {
                     chat,
@@ -1346,10 +1361,23 @@ mod session {
                 <div class="session" onclick={ctx.link().callback(|_| Msg::ProfileModal(false))}>
                     <div class="sidebar">
                         <div class="tabs">
-                            <div class="chats tab"></div>
-                            <div class="workspaces tab"></div>
-                            <div class="assistants tab"></div>
-                            <div class="characters tab"></div>
+                            {
+                                for vec![
+                                    ("chats", SidebarTab::Chats),
+                                    ("workspaces", SidebarTab::Workspaces),
+                                    ("assistants", SidebarTab::Assistants),
+                                    ("characters", SidebarTab::Characters),
+                                ].into_iter().map(|(name, tab)| 
+                                    html! {
+                                        <div
+                                            class={classes!(name, "tab", (self.sidebar_tab == tab).then_some("selected"))}
+                                            onclick={ctx.link().callback(move |_| Msg::SelectTab(tab.clone()))}
+                                        >
+                                            <img src={format!("./static/icons/{}.svg", name)} />
+                                        </div>
+                                    }
+                                )
+                            }
                         </div>
                         <div class="chats-list-container">
                             <div class="new-chat">
@@ -1392,7 +1420,7 @@ mod session {
                                         Msg::ProfileModal(new_profile_modal)
                                     })
                                 }>
-                                    <img class="icon" src="./static/user_icon.svg" />
+                                    <img class="icon" src="./static/icons/user.svg" />
                                     <span class="name">{ctx.props().user.username.clone()}</span>
                                 </button>
                                 <div class={classes!("modal", self.profile_modal.then_some("open"))}>
@@ -1451,7 +1479,7 @@ mod session {
                                                     fn render_message(author: String, author_name: &str, content: &str, key: u64, error: bool) -> Html {
                                                         let profile_icon = match &*author {
                                                             "assistant" => "./static/logo.svg",
-                                                            "user" | _ => "./static/user_icon.svg",
+                                                            "user" | _ => "./static/icons/user.svg",
                                                         };
                                                         let error = error.then_some("error");
                                                         html! {
@@ -1537,7 +1565,7 @@ mod session {
                                                             })
                                                         }
                                                     >
-                                                        <img src={"./static/submit_message.svg"} />
+                                                        <img src={"./static/icons/submit_message.svg"} />
                                                     </div>
                                                 </div>
                                             </>

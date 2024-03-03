@@ -5,8 +5,8 @@ $trim: rgb(79, 78, 78);
 $trim-light: rgb(157, 157, 157);
 
 $text: rgb(196, 196, 196);
-$interact: rgb(62, 62, 62);
-$card: rgb(30, 30, 30);
+$selected: rgb(62, 62, 62);
+$hover: rgb(30, 30, 30);
 
 $success: rgb(35, 68, 34);
 $progress: rgb(48, 59, 69);
@@ -42,7 +42,7 @@ $error-text: rgb(216, 110, 83);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba($color: $interact, $alpha: 0.75);
+  background: rgba($color: $selected, $alpha: 0.75);
   border-radius: 0.2em;
 }
 
@@ -165,9 +165,19 @@ $chats-list-width: 14em;
         height: calc($tabs-width - $margin);
         margin: $margin;
         border-radius: 0.4em;
+        cursor: pointer;
+
+        img {
+          width: 100%;
+          height: 100%;
+        }
+
+        &.selected {
+          background-color: $selected;
+        }
         
         &:hover {
-          background-color: $interact;
+          background-color: $hover;
         }
       }
     }
@@ -206,11 +216,11 @@ $chats-list-width: 14em;
           transition-duration: 0.2s;
   
           &.selected {
-            background-color: $interact;
+            background-color: $selected;
           }
   
           &:hover {
-            background-color: $card;
+            background-color: $hover;
             box-shadow: 0em 0em 1em 0.1em rgba($color: #000000, $alpha: 0.1);
           }
         }
@@ -392,11 +402,11 @@ $chats-list-width: 14em;
             cursor: pointer;
 
             &:hover {
-              background-color: $secondary;
+              background-color: $hover;
             }
           
             &:active {
-              background-color: $interact;
+              background-color: $selected;
             }
           }
         }
@@ -506,7 +516,7 @@ button {
   }
 
   &:active {
-    background-color: $interact;
+    background-color: $selected;
   }
 }
 
