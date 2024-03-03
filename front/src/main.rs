@@ -213,23 +213,25 @@ mod login {
 
         fn view(&self, ctx: &Context<Self>) -> Html {
             html! {
-                <div class={"login"}>
-                    <div class={"login-box"}>
-                        <div class={"login-form"}>
-                            <label for="identifier">{"Username / Email"}</label>
+                <div class="login">
+                    <div class="login-box">
+                        <div class="login-form grid">
+                            <label for="identifier" class="left row-1">{"Username / Email"}</label>
                             <input
+                                class="right row-1"
                                 type="text"
-                                id="identifier"
+                                name="identifier"
                                 value={self.identifier.clone()}
                                 oninput={ctx.link().callback(|e: InputEvent| {
                                     let input: HtmlInputElement = e.target_unchecked_into();
                                     Msg::UpdateIdentifier(input.value())
                                 })}
                             />
-                            <label for="password">{"Password"}</label>
+                            <label for="password" class="left row-2">{"Password"}</label>
                             <input
+                                class="right row-2"
                                 type="password"
-                                id="password"
+                                name="password"
                                 value={self.password.clone()}
                                 oninput={ctx.link().callback(|e: InputEvent| {
                                     let input: HtmlInputElement = e.target_unchecked_into();
@@ -244,7 +246,7 @@ mod login {
                                     None
                                 })}
                             />
-                            <button class="login-button" onclick={ctx.link().callback(|_| Msg::Request)}>{"Login"}</button>
+                            <button class="login-button row-3" onclick={ctx.link().callback(|_| Msg::Request)}>{"Login"}</button>
                         </div>
                         {
                             match &self.message {
@@ -452,17 +454,17 @@ mod session {
                                 })
                             }
                             </select>
-                            <div class="settings-form">
+                            <div class="settings-form grid">
                                 {
                                     match &this.model_settings {
                                         Unloaded | Loading => html! {},
                                         Loaded(model_settings) => {
                                             html! {
                                                 <>
-                                                    <label for="temperature">{"Temperature"}</label>
+                                                    <label for="temperature" class="left row-1">{"Temperature"}</label>
                                                     <input
-                                                        class="setting-input"
-                                                        id="temperature"
+                                                        class="right row-1"
+                                                        name="temperature"
                                                         type="number"
                                                         value={model_settings.temperature.to_string()}
                                                         oninput={
@@ -475,10 +477,10 @@ mod session {
                                                             })
                                                         }
                                                     />
-                                                    <label for="context_length">{"Maximum Context Length"}</label>
+                                                    <label for="context_length" class="left row-2">{"Maximum Context Length"}</label>
                                                     <input
-                                                        class="setting-input"
-                                                        id="context_length"
+                                                        class="right row-2"
+                                                        name="context_length"
                                                         type="number"
                                                         value={model_settings.context_length.to_string()}
                                                         oninput={
@@ -491,10 +493,10 @@ mod session {
                                                             })
                                                         }
                                                     />
-                                                    <label for="system_prompt">{"System Prompt"}</label>
+                                                    <label for="system_prompt" class="left row-3">{"System Prompt"}</label>
                                                     <textarea
-                                                        class="setting-input"
-                                                        id="system_prompt"
+                                                        class="right row-3"
+                                                        name="system_prompt"
                                                         rows=12
                                                         value={model_settings.system_prompt.clone()}
                                                         oninput={
@@ -508,8 +510,8 @@ mod session {
                                                             })
                                                         }
                                                     />
-                                                    <button class="save" onclick={ctx.link().callback(|_| Msg::SaveSettings)}>{"Save"}</button>
-                                                    <button class="clear" onclick={ctx.link().callback(|_| Msg::ClearSettings)}>{"Reset to default"}</button>
+                                                    <button class="save left row-4" onclick={ctx.link().callback(|_| Msg::SaveSettings)}>{"Save"}</button>
+                                                    <button class="clear right row-4" onclick={ctx.link().callback(|_| Msg::ClearSettings)}>{"Reset to default"}</button>
                                                     {
                                                         this.confirmation_popup.as_ref().map(|message| html! {
                                                             <span>{message}</span>
@@ -717,12 +719,19 @@ mod session {
         Characters,
     }
 
-    #[derive(Debug, Default)]
+    #[derive(Debug)]
     pub enum MainView {
-        #[default]
-        NewChat,
+        Chat(Option<Rc<RefCell<Chat>>>),
+        NewWorkspace,
+        NewAssistant,
+        NewCharacter,
         Settings,
-        Chat(Rc<RefCell<Chat>>),
+    }
+
+    impl Default for MainView {
+        fn default() -> Self {
+            Self::Chat(None)
+        }
     }
 
     #[derive(Default)]
@@ -742,6 +751,7 @@ mod session {
         ToggleSidebar,
         NewChat,
         SelectChat(Rc<RefCell<Chat>>),
+        SelectMainView(MainView),
         UpdateMessage(String),
         SubmitMessage,
         SelectModel(String),
@@ -855,7 +865,7 @@ mod session {
                     self.sidebar_collapsed = !self.sidebar_collapsed;
                 }
                 Msg::NewChat => {
-                    self.main_view = MainView::NewChat;
+                    self.main_view = MainView::Chat(None);
                     if let Loaded(model_selection) = &mut self.model_selection {
                         model_selection.selected = model_selection.default.clone();
                     }
@@ -866,7 +876,10 @@ mod session {
                             model_selection.selected = real_chat.chat.model.clone();
                         }
                     }
-                    self.main_view = MainView::Chat(chat);
+                    self.main_view = MainView::Chat(Some(chat));
+                }
+                Msg::SelectMainView(view) => {
+                    self.main_view = view;
                 }
                 Msg::UpdateMessage(message) => {
                     self.message_input = message;
@@ -874,7 +887,7 @@ mod session {
                 Msg::SubmitMessage => {
                     let content = mem::replace(&mut self.message_input, String::new());
                     match &self.main_view {
-                        MainView::Chat(chat) => {
+                        MainView::Chat(Some(chat)) => {
                             let user_message_key: ElemKey = rand::random();
 
                             let ChatContent::Real(real_chat) = &mut RefCell::borrow_mut(chat).inner
@@ -915,7 +928,7 @@ mod session {
                                 }
                             });
                         }
-                        MainView::NewChat => {
+                        MainView::Chat(None) => {
                             let Loaded(loaded_chats) = &mut self.chats else {
                                 error!("Chats aren't loaded yet");
                                 return false;
@@ -934,7 +947,7 @@ mod session {
                                 },
                             });
                             loaded_chats.chat_list.push(new_chat_skeleton.clone());
-                            self.main_view = MainView::Chat(new_chat_skeleton);
+                            self.main_view = MainView::Chat(Some(new_chat_skeleton));
                             let model = model_selection.selected.clone();
                             ctx.link().send_future(async move {
                                 let response: new_chat::Response = json!(post!(
@@ -951,8 +964,8 @@ mod session {
                                 }
                             });
                         }
-                        MainView::Settings => {
-                            error!("Can't send a message from the settings page!");
+                        _ => {
+                            error!("Can't send a message from any page besides the chat page!");
                             return false;
                         }
                     }
@@ -963,7 +976,7 @@ mod session {
                         return false;
                     };
                     'chat_update: {
-                        let MainView::Chat(chat) = &self.main_view else {
+                        let MainView::Chat(Some(chat)) = &self.main_view else {
                             break 'chat_update;
                         };
                         let ChatContent::Real(real_chat) = &mut RefCell::borrow_mut(chat).inner
@@ -985,7 +998,7 @@ mod session {
                     self.profile_modal = false;
                 }
                 Msg::CloseSetting => {
-                    self.main_view = MainView::NewChat;
+                    self.main_view = MainView::Chat(None);
                 }
                 Msg::ProfileModal(open) => {
                     self.profile_modal = open;
@@ -1077,7 +1090,7 @@ mod session {
                         inner: ChatContent::Real(real_chat),
                     };
                     let new_chat = RcRefCell::new(new_chat);
-                    self.main_view = MainView::Chat(new_chat.clone());
+                    self.main_view = MainView::Chat(Some(new_chat.clone()));
                     loaded_chats.chat_list.push(new_chat.clone());
                     loaded_chats.chat_index.insert(chat_id, new_chat.clone());
                     loaded_chats
@@ -1342,7 +1355,7 @@ mod session {
             }
 
             // attempt to load messages for current chat
-            if let MainView::Chat(chat) = &self.main_view {
+            if let MainView::Chat(Some(chat)) = &self.main_view {
                 let chat_borrow = RefCell::borrow(chat);
                 if let ChatContent::Real(real_chat) = &chat_borrow.inner {
                     if matches!(real_chat.messages, Unloaded) {
@@ -1353,7 +1366,7 @@ mod session {
 
             // render page
             let input_disabled = match &self.main_view {
-                MainView::Chat(chat) => !RefCell::borrow(chat).is_available(),
+                MainView::Chat(Some(chat)) => !RefCell::borrow(chat).is_available(),
                 _ => false,
             };
 
@@ -1401,7 +1414,7 @@ mod session {
                                                                 ctx.link().callback(move |_| Msg::SelectChat(chat.clone()))
                                                             };
                                                             let selected = match &self.main_view {
-                                                                MainView::Chat(current) => Rc::ptr_eq(chat, current),
+                                                                MainView::Chat(Some(current)) => Rc::ptr_eq(chat, current),
                                                                 _ => false
                                                             };
                                                             let chat = RefCell::borrow(chat);
@@ -1418,7 +1431,7 @@ mod session {
                                     SidebarTab::Workspaces => html! {
                                         <div class="list-container workspaces-list-container">
                                             <div class="new-workspace new-item">
-                                                <button onclick={ctx.link().callback(|_| Msg::NewChat)}>{" + New Workspace"}</button>
+                                                <button onclick={ctx.link().callback(|_| Msg::SelectMainView(MainView::NewWorkspace))}>{" + New Workspace"}</button>
                                             </div>
                                             <div class="horizontal divider"></div>
                                             <div class="workspaces-list list scrollable">
@@ -1433,7 +1446,7 @@ mod session {
                                     SidebarTab::Assistants => html! {
                                         <div class="list-container assistants-list-container">
                                             <div class="new-assistant new-item">
-                                                <button onclick={ctx.link().callback(|_| Msg::NewChat)}>{" + New Assistant"}</button>
+                                                <button onclick={ctx.link().callback(|_| Msg::SelectMainView(MainView::NewAssistant))}>{" + New Assistant"}</button>
                                             </div>
                                             <div class="horizontal divider"></div>
                                             <div class="assistants-list list scrollable">
@@ -1448,7 +1461,7 @@ mod session {
                                     SidebarTab::Characters =>  html! {
                                         <div class="list-container characters-list-container">
                                             <div class="new-character new-item">
-                                                <button onclick={ctx.link().callback(|_| Msg::NewChat)}>{" + New Character"}</button>
+                                                <button onclick={ctx.link().callback(|_| Msg::SelectMainView(MainView::NewCharacter))}>{" + New Character"}</button>
                                             </div>
                                             <div class="horizontal divider"></div>
                                             <div class="characters-list list scrollable">
@@ -1485,13 +1498,13 @@ mod session {
                             </div>
                         </div>
                     </div>
-                    <div class="chat-layer">
+                    <div class="main-view-layer">
                         <div class={classes!("sidebar-window", self.sidebar_collapsed.then_some("collapsed"))}></div>
-                        <div class="chat-and-sidebar-toggle">
+                        <div class="main-view-and-sidebar-toggle">
                             <div class="sidebar-toggle">
                                 <button onclick={ctx.link().callback(|_| Msg::ToggleSidebar)}>{if self.sidebar_collapsed { ">" } else { "<" }}</button>
                             </div>
-                            <div class="chat-window">
+                            <div class="main-view">
                                 {
                                     match &self.main_view {
                                         MainView::Settings => {
@@ -1508,7 +1521,7 @@ mod session {
                                                 }
                                             }
                                         }
-                                        _ => html! {
+                                        MainView::Chat(maybe_chat) => html! {
                                             <>
                                                 <div class="model-selection-header">
                                                     {
@@ -1548,7 +1561,7 @@ mod session {
                                                         }
                                                     }
 
-                                                    if let MainView::Chat(chat) = &self.main_view {
+                                                    if let Some(chat) = &maybe_chat {
                                                         let chat = RefCell::borrow(chat);
                                                         let messages: Html = match &chat.inner {
                                                             ChatContent::Skeleton { user_message, user_message_key } => {
@@ -1624,7 +1637,99 @@ mod session {
                                                     </div>
                                                 </div>
                                             </>
-                                        }
+                                        },
+                                        MainView::NewWorkspace => html! {
+                                            <div class="new-context new-workspace">
+                                                <h1>{"New Workspace"}</h1>
+                                                <div class="configuration-items grid">
+                                                    <label class="left row-1" for="name">{"Name"}</label>
+                                                    <input class="right row-1" type="text" name="name" />
+
+                                                    <label class="left row-2" for="temperature">{"Temperature"}</label>
+                                                    <input class="right row-2" type="number" name="temperature" />
+                                                    
+                                                    <label class="left row-3" for="system_prompt">{"System Prompt"}</label>
+                                                    <textarea class="right row-3" rows=12 name="system_prompt" />
+                                                    
+                                                    <label class="left row-4" for="files">{"Files"}</label>
+                                                    <ul class="right row-4" name="files">
+                                                        <li>{"File 1"}</li>
+                                                        <li>{"File 2"}</li>
+                                                        <li>{"File 3"}</li>
+                                                        <li><span>{"Upload a new file"}</span><input type="file"/></li>
+                                                    </ul>
+
+                                                    <label class="left row-5" for="members">{"Members"}</label>
+                                                    <ul class="right row-5" name="members">
+                                                        <li>{ctx.props().user.username.clone()}</li>
+                                                        <li>{"+ Add new member"}</li>
+                                                    </ul>
+
+                                                    <button class="left row-6">{"Create Workspace"}</button>
+                                                </div>
+                                            </div>
+                                        },
+                                        MainView::NewAssistant => html! {
+                                            <div class="new-context new-assistant">
+                                                <h1>{"New Assistant"}</h1>
+                                                <div class="configuration-items grid">
+                                                    <label class="left row-1" for="name">{"Name"}</label>
+                                                    <input class="right row-1" type="text" name="name" />
+
+                                                    <label class="left row-2" for="temperature">{"Temperature"}</label>
+                                                    <input class="right row-2" type="number" name="temperature" />
+                                                    
+                                                    <label class="left row-3" for="system_prompt">{"System Prompt"}</label>
+                                                    <textarea class="right row-3" rows=12 name="system_prompt" />
+                                                    
+                                                    <label class="left row-4" for="personality">{"Personality"}</label>
+                                                    <textarea class="right row-4" rows=8 name="personality" />
+                                                    
+                                                    <label class="left row-5" for="goal">{"Goal"}</label>
+                                                    <textarea class="right row-5" rows=8 name="goal" />
+                                                    
+                                                    <label class="left row-6" for="profile_picture">{"Profile Picture"}</label>
+                                                    <input class="right row-6" type="file" name="profile_picture" accept="image/*"/>
+
+                                                    <button class="left row-7">{"Create Assistant"}</button>
+                                                </div>
+                                            </div>
+                                        },
+                                        MainView::NewCharacter => html! {
+                                            <div class="new-context new-character">
+                                                <h1>{"New Character"}</h1>
+                                                <div class="configuration-items grid">
+                                                    <label class="left row-1" for="name">{"Name"}</label>
+                                                    <input class="right row-1" type="text" name="name" />
+
+                                                    <label class="left row-2" for="temperature">{"Temperature"}</label>
+                                                    <input class="right row-2" type="number" name="temperature" />
+                                                    
+                                                    <label class="left row-3" for="system_prompt">{"System Prompt"}</label>
+                                                    <textarea class="right row-3" rows=12 name="system_prompt" />
+                                                    
+                                                    <label class="left row-4" for="personality">{"Personality"}</label>
+                                                    <textarea class="right row-4" rows=8 name="personality" />
+                                                    
+                                                    <label class="left row-5" for="appearance">{"Appearance"}</label>
+                                                    <textarea class="right row-5" rows=8 name="appearance" />
+                                                    
+                                                    <label class="left row-6" for="scenario">{"Scenario"}</label>
+                                                    <textarea class="right row-6" rows=8 name="scenario" />
+                                                    
+                                                    <label class="left row-7" for="thought_process">{"Thought Process"}</label>
+                                                    <textarea class="right row-7" rows=8 name="thought_process" />
+                                                    
+                                                    <label class="left row-8" for="greeting">{"Greeting"}</label>
+                                                    <textarea class="right row-8" rows=8 name="greeting" />
+                                                    
+                                                    <label class="left row-9" for="profile_picture">{"Profile Picture"}</label>
+                                                    <input class="right row-9" type="file" name="profile_picture" accept="image/*"/>
+
+                                                    <button class="left row-10">{"Create Character"}</button>
+                                                </div>
+                                            </div>
+                                        },
                                     }
                                 }
                             </div>
