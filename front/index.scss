@@ -6,6 +6,7 @@ $trim-light: rgb(157, 157, 157);
 
 $text: rgb(196, 196, 196);
 $interact: rgb(62, 62, 62);
+$card: rgb(30, 30, 30);
 
 $success: rgb(35, 68, 34);
 $progress: rgb(48, 59, 69);
@@ -174,17 +175,21 @@ $sidebar-width: 14em;
       max-height: 100%;
 
       .chat {
-        height: 3em;
         align-items: center;
-        margin: 0.8em 0.2em 0 0.6em;
+        margin: 0.4em 0em 0 0.2em;
         padding: 0.6em;
-        border-radius: 0.7em;
-        box-shadow: 0em 0em 1em 0.1em rgba($color: #000000, $alpha: 0.1);
-        border: 1px solid $tertiary;
+        border-radius: 0.4em;
+        border: none;
         cursor: pointer;
+        transition-duration: 0.2s;
 
         &.selected {
           background-color: $interact;
+        }
+
+        &:hover {
+          background-color: $card;
+          box-shadow: 0em 0em 1em 0.1em rgba($color: #000000, $alpha: 0.1);
         }
       }
     }
